@@ -165,7 +165,7 @@ typedef struct String_Pair
 
 typedef struct String16
 {
-	u16 *bytes; // apologies for the misnomer
+	wchar_t *bytes; // apologies for the misnomer
 	isz  count;
 } String16;
 

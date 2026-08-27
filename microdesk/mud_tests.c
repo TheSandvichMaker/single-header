@@ -1,6 +1,6 @@
 #define DC_IMPL
 #define DC_STATIC
-#include "dc.h"
+#include <dc.h>
 
 #define MUD_STRING String
 #define MUD_STRING_BYTES(str) ((char const *)(str).bytes)
@@ -33,10 +33,11 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	Mud_Parse_Result result = mud_parse_from_string(mud_nodes, ArrayCount(mud_nodes), api_mud);
+	Mud_Parser parser;
+	Mud_Parse_Result result = mud_parse_from_string(&parser, mud_nodes, ArrayCount(mud_nodes), api_mud);
 	if (result.error != Mud_Error_none)
 	{
-		fprintf(stderr, "Mud Error (TODO: report properly)\n");
+		fprintf(stderr, "Mud Error: %.*s\n", Sx(result.error_message));
 	}
 
 	String_Builder sb;

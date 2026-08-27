@@ -1,12 +1,12 @@
+//
+// Header
+//
+
 #ifndef MUD_H
 #define MUD_H
 
 #include <stdint.h>
 #include <stddef.h>
-
-#if _10X_EDITOR
-#define MUD_IMPL
-#endif
 
 typedef uint8_t Mud_Bool;
 
@@ -145,26 +145,42 @@ typedef struct Mud_Parser
 	} token;
 
 	Mud_Error error;
+
+	Mud_Int message_length;
+	char    message_buffer[256];
 } Mud_Parser;
 
 typedef struct Mud_Parse_Result
 {
-	Mud_Error error;
-	Mud_Int   node_count;
+	Mud_Error  error;
+	MUD_STRING error_message; 
+	Mud_Int    node_count;
 } Mud_Parse_Result;
 
 MUD_API MUD_STRING mud_token_to_string(Mud_Token tok);
-MUD_API Mud_Parse_Result mud_parse_from_string(Mud_Node *nodes_buffer, Mud_Int nodes_buffer_size, MUD_STRING source);
+MUD_API Mud_Parse_Result mud_parse_from_string(Mud_Parser *parser, Mud_Node *nodes_buffer, Mud_Int nodes_buffer_size, MUD_STRING source);
 
 #endif
+
+//
+// Implementation
+//
 
 #if defined(MUD_IMPL)
 
 MUD_INLINE void mud_error(Mud_Parser *p, Mud_Error error_code, MUD_STRING message)
 {
 	p->error = error_code;
-	(void)message;
-	// TODO(daniel): use message
+	p->message_length = 0;
+	for (Mud_Int i = 0; i < MUD_STRING_COUNT(message); i += 1)
+	{
+		p->message_buffer[p->message_length++] = MUD_STRING_BYTES(message)[i];
+		if (p->message_length + 1 == sizeof(p->message_buffer))
+		{
+			break;
+		}
+	}
+	p->message_buffer[p->message_length] = 0;
 }
 
 MUD_INLINE Mud_Bool mud_keep_parsing(Mud_Parser *p)
@@ -852,10 +868,18 @@ bail:
 	return first_child;
 }
 
-Mud_Parse_Result mud_parse_from_string(Mud_Node *nodes_buffer, Mud_Int nodes_buffer_size, MUD_STRING source)
+MUD_INLINE void mud_memset(void *mem, uint8_t value, Mud_Int count)
 {
-	Mud_Parser _p = {0};
-	Mud_Parser *p = &_p;
+	uint8_t *bytes = (uint8_t *)mem;
+	for (Mud_Int i = 0; i < count; i += 1)
+	{
+		bytes[i] = value;
+	}
+}
+
+Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mud_Int nodes_buffer_size, MUD_STRING source)
+{
+	mud_memset(p, 0, sizeof(*p));
 	p->out_nodes = nodes_buffer;
 	p->out_node_capacity = nodes_buffer_size;
 	p->source = source;
@@ -884,6 +908,8 @@ Mud_Parse_Result mud_parse_from_string(Mud_Node *nodes_buffer, Mud_Int nodes_buf
 	}
 
 	result.node_count = p->out_nodes_used;
+	MUD_STRING_BYTES_ASSIGN(result.error_message, p->message_buffer);
+	MUD_STRING_COUNT_ASSIGN(result.error_message, p->message_length);
 	return result;
 }
 
