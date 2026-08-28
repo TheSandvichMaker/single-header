@@ -3,9 +3,10 @@
 
 // Editor
 #if _10X_EDITOR
-	#define _WIN32 1
-	#define DC_IMPL 1
-	#define DC_ARENA_DEBUG 
+	#define _WIN32
+	#define DC_IMPL
+	#define DC_ARENA_DEBUG
+	#define DC_WITH_TESTING
 #endif
 
 #ifndef DC_USE_BACKSLASH_AS_PATH_SEPARATOR_ON_WINDOWS
@@ -444,7 +445,7 @@ fn String string_unescapify(Arena *arena, String string);
 #define Sf(fmt, ...) string_format(arena_get_temp_unscoped(), fmt, ## __VA_ARGS__)
 
 // Compare
-typedef uint32_t String_Match_Flags;
+typedef u32 String_Match_Flags;
 enum
 {
 	SM_insensitive = (1u << 0),
@@ -557,7 +558,7 @@ fn String_Pair string_split_identifier(String string);
 fn String string_iter_word(String *iter);
 fn String string_iter_line(String *iter);
 #define String_EachWord(word, words) String iter = words, word = string_iter_word(&iter); !string_empty(word); word = string_iter_word(&iter)
-#define String_EachLine(line, lines) String iter = lines, line = string_iter_line(&iter); !(string_empty(line) && string_empty(iter)); line = string_iter_line(&iter)
+#define String_EachLine(line, lines) String iter = lines, line = string_iter_line(&iter); !string_empty(line); line = string_iter_line(&iter)
 
 typedef struct Parse_Number_Result {
 	b32 is_valid;
@@ -675,6 +676,12 @@ fn isz sb_append_bin_f64(String_Builder *sb, f64 v);
 fn bool sb_verify(String_Builder *sb);
 
 //
+// Hashing
+//
+
+fn u32 murmur32(void const *key, u32 len, u32 h1);
+
+//
 // File System
 //
 
@@ -715,32 +722,36 @@ fn void logf   (Log_Level level, String file, isz line, char const *fmt, ...);
 fn void logf_va(Log_Level level, String file, isz line, char const *fmt, va_list args);
 
 #define LOG(level, fmt, ...) logf(Log_Level_##level, S(__FILE__), __LINE__, fmt, ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...) LOG(debug, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...) LOG(info, fmt, ##__VA_ARGS__)
-#define LOG_WARNING(fmt, ...) LOG(warning, fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) LOG(error, fmt, ##__VA_ARGS__)
-#define LOG_FATAL(fmt, ...) LOG(fatal, fmt, ##__VA_ARGS__)
 
 //
 // Testing
 //
 
+#if defined(DC_WITH_TESTING)
+
 typedef struct Test_Context
 {
-	isz   ran_count;
-	isz   failed_count;
+	isz   suite_index;
+	isz   check_index;
+	isz   suites_ran;
+	isz   suites_failed;
+	isz   checks_ran_count;
+	isz   checks_failed_count;
 	void *user_data;
 } Test_Context;
 
 typedef void (*Test_Suite)(Test_Context *t);
 
+fn void test_runner_init(Test_Context *t);
 fn void test_run(Test_Context *t, String name, Test_Suite suite);
 #define TEST_RUN(t, suite) test_run(t, S(#suite), suite);
-fn void test_expect   (Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...);
-fn void test_expect_va(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, va_list args);
-#define TEST_EXPECT(t, cond, ...) test_expect(t, cond, S(__FILE__), __LINE__, S(#cond), "" ##__VA_ARGS__)
+fn void test_check(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...);
+fn void test_check_va(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, va_list args);
+#define TEST_CHECK(t, cond, ...) test_check(t, cond, S(__FILE__), __LINE__, S(#cond), "" ##__VA_ARGS__)
 
 fn int test_report(Test_Context *t);
+
+#endif
 
 //
 // Thread-Local Storage
@@ -781,8 +792,8 @@ typedef struct DC_Context
 {
 	Arena *arena;
 
-	int    argc;
-	char **argv;
+	isz     argc;
+	String *argv;
 
 	TLS_Handle tctx;
 
@@ -3085,6 +3096,59 @@ bool sb_verify(String_Builder *sb)
 }
 
 //
+// Hashing
+//
+
+// Sourced from https://gist.github.com/kevinmoran/471480b1e20a19b0687d81b75fd801c8
+// Minimal Murmur3 implementation shared by Demetri Spanos on Handmade Network Discord
+//
+// Code is deliberately terse and simplistic
+// Intended to be the first hash function you reach for e.g. a simple hash table
+// *** NB THIS IS NOT A CRYPTOGRAPHIC HASH ***
+//
+// @demetrispanos:
+// "yes let me reiterate the moral of this story
+// there is never any reason to use a dumb made up hash function
+// use murmur3 or jenkins-one-at-a-time for a 0-effort version
+// both are quite good, though not quite as good as modern state of the art
+// but modern state of the art ones aren't as simple (i.e. not 20 lines long)
+// banish "TODO: better hash function" from your life
+// just use my 20 line murmur3"
+
+fn_local u32 rotl32(u32 x, u8 r)
+{ 
+	return (x << r) | (x >> (32 - r));
+}
+
+fn_local u32 fmix(u32 h )
+{
+	h ^= h >> 16; h *= 0x85ebca6b;
+	h ^= h >> 13; h *= 0xc2b2ae35;
+	return h ^= h >> 16;
+}
+
+u32 murmur32(void const *key, u32 len, u32 h1)
+{
+	u8 const *tail = (u8 const *)key + (len/4)*4; // handle this separately
+
+	u32 c1 = 0xcc9e2d51, c2 = 0x1b873593;
+
+	// body (full 32-bit blocks) handled uniformly
+	for (u32 *p = (u32 *) key; p < (u32 const *)tail; p++) {
+		u32 k1 = *p; k1 *= c1; k1 = rotl32(k1,15); k1 *= c2; // MUR1
+		h1 ^= k1; h1 = rotl32(h1,13); h1 = h1*5+0xe6546b64; // MUR2
+	}
+
+	u32 t = 0; // handle up to 3 tail bytes
+	switch(len & 3) {
+		case 3: t ^= tail[2] << 16;
+		case 2: t ^= tail[1] << 8;
+		case 1: {t ^= tail[0]; t *= c1; t = rotl32(t,15); t *= c2; h1 ^= t;};
+	}
+	return fmix(h1 ^ len);
+}
+
+//
 // File System
 //
 
@@ -3108,15 +3172,9 @@ typedef enum Win32_Io_Status
 	Win32_Io_Status_done_sync,
 	Win32_Io_Status_done_sync_eof,
 	Win32_Io_Status_error,
-} Win32_Io_Status_Status;
+} Win32_Io_Status;
 
-fn_local Win32_Io_Status_Status win32_async_read(
-	HANDLE      handle,
-	uint64_t    offset,
-	uint32_t    size,
-	void       *buffer,
-	OVERLAPPED *overlapped,
-	uint32_t   *read_size)
+fn_local Win32_Io_Status win32_async_read(HANDLE handle, u64 offset, u32 size, void *buffer, OVERLAPPED *overlapped, u32 *read_size)
 {
 	zero_struct(overlapped);
 
@@ -3134,7 +3192,7 @@ fn_local Win32_Io_Status_Status win32_async_read(
 
 	*read_size = bytes_read;
 
-	Win32_Io_Status_Status result = Win32_Io_Status_error;
+	Win32_Io_Status result = Win32_Io_Status_error;
 
 	if (read_ok)
 	{
@@ -3177,13 +3235,7 @@ fn_local Win32_Io_Status_Status win32_async_read(
 	return result;
 }
 
-fn_local Win32_Io_Status_Status win32_async_write(
-	HANDLE      handle,
-	uint64_t    offset,
-	uint32_t    size,
-	const void *buffer,
-	OVERLAPPED *overlapped,
-	uint32_t   *written_size)
+fn_local Win32_Io_Status win32_async_write(HANDLE handle, u64 offset, u32 size, const void *buffer, OVERLAPPED *overlapped, u32 *written_size)
 {
 	zero_struct(overlapped);
 
@@ -3202,7 +3254,7 @@ fn_local Win32_Io_Status_Status win32_async_write(
 
 	*written_size = bytes_written;
 
-	Win32_Io_Status_Status result = Win32_Io_Status_error;
+	Win32_Io_Status result = Win32_Io_Status_error;
 
 	if (write_ok)
 	{
@@ -3240,9 +3292,9 @@ fn_local Win32_Io_Status_Status win32_async_write(
 	return result;
 }
 
-fn_local Win32_Io_Status_Status win32_get_async_result(HANDLE handle, OVERLAPPED *overlapped, uint32_t *out_size)
+fn_local Win32_Io_Status win32_get_async_result(HANDLE handle, OVERLAPPED *overlapped, u32 *out_size)
 {
-	Win32_Io_Status_Status result = Win32_Io_Status_error;
+	Win32_Io_Status result = Win32_Io_Status_error;
 
 	DWORD size = 0;
 
@@ -3277,19 +3329,14 @@ fn_local Win32_Io_Status_Status win32_get_async_result(HANDLE handle, OVERLAPPED
 	return result;
 }
 
-fn_local Win32_Io_Status_Status win32_sync_read_sub(
-	HANDLE    handle,
-	uint64_t  offset,
-	uint32_t  size,
-	void     *buffer,
-	uint32_t *read_size)
+fn_local Win32_Io_Status win32_sync_read_sub(HANDLE handle, u64 offset, u32 size, void *buffer, u32 *read_size)
 {
 	if (read_size)
 	{
 		*read_size = 0;
 	}
 
-	Win32_Io_Status_Status result = Win32_Io_Status_error;
+	Win32_Io_Status result = Win32_Io_Status_error;
 
 	if (size == 0)
 	{
@@ -3301,8 +3348,8 @@ fn_local Win32_Io_Status_Status win32_sync_read_sub(
 		{
 			OVERLAPPED async = { 0 };
 
-			uint32_t               bytes_read = 0;
-			Win32_Io_Status_Status status     = win32_async_read(handle, offset, size, buffer, &async, &bytes_read);
+			u32               bytes_read = 0;
+			Win32_Io_Status status     = win32_async_read(handle, offset, size, buffer, &async, &bytes_read);
 
 			if (status == Win32_Io_Status_started_async)
 			{
@@ -3358,19 +3405,14 @@ fn_local Win32_Io_Status_Status win32_sync_read_sub(
 	return result;
 }
 
-fn_local Win32_Io_Status_Status win32_sync_write_sub(
-	HANDLE      handle,
-	uint64_t    offset,
-	uint32_t    size,
-	const void *buffer,
-	uint32_t   *written_size)
+fn_local Win32_Io_Status win32_sync_write_sub(HANDLE handle, u64 offset, u32 size, const void *buffer, u32 *written_size)
 {
 	if (written_size)
 	{
 		*written_size = 0;
 	}
 
-	Win32_Io_Status_Status result = Win32_Io_Status_error;
+	Win32_Io_Status result = Win32_Io_Status_error;
 
 	if (size == 0)
 	{
@@ -3382,8 +3424,8 @@ fn_local Win32_Io_Status_Status win32_sync_write_sub(
 		{
 			OVERLAPPED async = { 0 };
 
-			uint32_t               bytes_written = 0;
-			Win32_Io_Status_Status status        = win32_async_write(handle, offset, size, buffer, &async, &bytes_written);
+			u32 bytes_written = 0;
+			Win32_Io_Status status = win32_async_write(handle, offset, size, buffer, &async, &bytes_written);
 
 			if (status == Win32_Io_Status_started_async)
 			{
@@ -3407,7 +3449,7 @@ fn_local Win32_Io_Status_Status win32_sync_write_sub(
 				if (error == ERROR_NO_SYSTEM_RESOURCES ||
 					error == ERROR_NOT_ENOUGH_MEMORY)
 				{
-					DWORD milliseconds = MIN(1 + (uint32_t)retry_index*10, 50);
+					DWORD milliseconds = MIN(1 + (u32)retry_index*10, 50);
 					Sleep(milliseconds);
 				}
 				else
@@ -3422,13 +3464,7 @@ fn_local Win32_Io_Status_Status win32_sync_write_sub(
 	return result;
 }
 
-fn_local bool win32_sync_read(
-	HANDLE    handle,
-	uint64_t  offset,
-	uint64_t  size,
-	void     *buffer,
-	uint64_t *bytes_read,
-	uint32_t  alignment)
+fn_local bool win32_sync_read(HANDLE handle, u64 offset, u64 size, void *buffer, u64 *bytes_read, u32 alignment)
 {
 	if (alignment == 0)
 	{
@@ -3444,14 +3480,14 @@ fn_local bool win32_sync_read(
 
 	char *at = (char *)buffer;
 
-	uint64_t total_bytes_read = 0;
+	u64 total_bytes_read = 0;
 
 	while (size > 0)
 	{
-		uint32_t chunk_read_size = (uint32_t)MIN(size, DC_WIN32_IO_MAX_SINGLE_IO_SIZE);
+		u32 chunk_read_size = (u32)MIN(size, DC_WIN32_IO_MAX_SINGLE_IO_SIZE);
 
-		uint32_t               chunk_bytes_read = 0;
-		Win32_Io_Status_Status status           = win32_sync_read_sub(handle, offset, chunk_read_size, at, &chunk_bytes_read);
+		u32 chunk_bytes_read = 0;
+		Win32_Io_Status status = win32_sync_read_sub(handle, offset, chunk_read_size, at, &chunk_bytes_read);
 
 		if (status == Win32_Io_Status_error)
 		{
@@ -3494,13 +3530,7 @@ fn_local bool win32_sync_read(
 	return result;
 }
 
-fn_local bool win32_sync_write(
-	HANDLE      handle, 
-	uint64_t    offset, 
-	uint64_t    size, 
-	const void *buffer, 
-	uint64_t   *bytes_written, 
-	uint32_t    alignment)
+fn_local bool win32_sync_write(HANDLE handle, u64 offset, u64 size, const void *buffer, u64 *bytes_written, u32 alignment)
 {
 	if (alignment == 0)
 	{
@@ -3516,14 +3546,14 @@ fn_local bool win32_sync_write(
 
 	const char *at = (char *)buffer;
 
-	uint64_t total_bytes_written = 0;
+	u64 total_bytes_written = 0;
 
 	while (size > 0)
 	{
-		uint32_t chunk_write_size = (uint32_t)MIN(size, DC_WIN32_IO_MAX_SINGLE_IO_SIZE);
+		u32 chunk_write_size = (u32)MIN(size, DC_WIN32_IO_MAX_SINGLE_IO_SIZE);
 
-		uint32_t               chunk_bytes_written = 0;
-		Win32_Io_Status_Status status              = win32_sync_write_sub(handle, offset, chunk_write_size, at, &chunk_bytes_written);
+		u32 chunk_bytes_written = 0;
+		Win32_Io_Status status = win32_sync_write_sub(handle, offset, chunk_write_size, at, &chunk_bytes_written);
 
 		if (status == Win32_Io_Status_error)
 		{
@@ -3589,7 +3619,7 @@ bool os_write_entire_file(String path, Memory memory)
 
 		if (handle != INVALID_HANDLE_VALUE)
 		{
-			uint64_t written;
+			u64 written;
 			result = win32_sync_write(handle, 0, memory.size, memory.bytes, &written, 1);
 
 			CloseHandle(handle);
@@ -3626,7 +3656,7 @@ Memory os_read_entire_file(Arena *arena, String path)
 			{
 				char *buffer = (char *)arena_alloc_nozero(arena, file_size + 1, 16);
 
-				uint64_t bytes_read;
+				u64 bytes_read;
 				bool success = win32_sync_read(handle, 0, file_size, buffer, &bytes_read, 1);
 
 				if (success)
@@ -3699,29 +3729,22 @@ void logf_va(Log_Level level, String file, isz line, char const *fmt, va_list ar
 {
 	if (!_G->log_level_enabled[level]) return;
 
-	Arena_ScopedTemp {
-		String message = string_format_va(temp, fmt, args);
-		String level_string = log_level_to_string(level);
-		String result = string_format(temp, "[%.*s] %.*s:%zd: %.*s\n", Sx(level_string), Sx(file), line, Sx(message));
+	String level_string = log_level_to_string(level);
+	fprintf(stderr, "[%.*s] %.*s:%zd: ", Sx(level_string), Sx(file), line);
+	vfprintf(stderr, fmt, args);
+	fputc('\n', stderr);
 
-		fprintf(stderr, "%.*s", Sx(result));
-
-#if defined(_WIN32)
-		OutputDebugStringA(result.chars);
-#endif
-
-		if (level >= Log_Level_error)
+	if (level >= Log_Level_error)
+	{
+		if (os_is_debugger_attached())
 		{
-			if (os_is_debugger_attached())
-			{
-				debug_break();
-			}
+			debug_break();
 		}
+	}
 
-		if (level == Log_Level_fatal)
-		{
-			exit(-1);
-		}
+	if (level == Log_Level_fatal)
+	{
+		exit(-1);
 	}
 }
 
@@ -3729,36 +3752,98 @@ void logf_va(Log_Level level, String file, isz line, char const *fmt, va_list ar
 // Testing
 //
 
+#if defined(DC_WITH_TESTING)
+
+#if defined(_WIN32)
+
+// Required for _resetstkoflw, surprisingly.
+#include <malloc.h>
+
+fn_local int test_seh_filter(EXCEPTION_POINTERS *ep)
+{
+	DWORD code = ep->ExceptionRecord->ExceptionCode;
+	switch (code)
+	{
+		case EXCEPTION_ACCESS_VIOLATION:
+		case EXCEPTION_ILLEGAL_INSTRUCTION:
+		case EXCEPTION_INT_DIVIDE_BY_ZERO:
+		case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+		case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+		case EXCEPTION_STACK_OVERFLOW:
+			return EXCEPTION_EXECUTE_HANDLER;
+		default:
+			return EXCEPTION_CONTINUE_SEARCH;
+	}
+}
+#endif
+
+void test_runner_init(Test_Context *t)
+{
+	(void)t;
+}
+
 void test_run(Test_Context *t, String name, Test_Suite suite)
 {
-	isz ran_before    = t->ran_count;
-	isz failed_before = t->failed_count;
+	t->suites_ran += 1;
+	t->suite_index += 1;
 
-	suite(t);
+	t->check_index = 0;
 
-	isz ran    = t->ran_count - ran_before;
-	isz failed = t->failed_count - failed_before;
+	isz checks_ran_before = t->checks_ran_count;
+	isz checks_failed_before = t->checks_failed_count;
+
+	bool caught_exception = false;
+
+	// TODO(daniel): Figure out how all this is supposed to work!
+#if defined(_WIN32)
+	__try
+#endif
+	{
+		suite(t);
+	}
+#if defined(_WIN32)
+	__except (test_seh_filter(GetExceptionInformation()))
+	{
+		caught_exception = true;
+
+		if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW)
+		{
+			_resetstkoflw();
+		}
+	}
+#endif
+
+	isz ran = t->checks_ran_count - checks_ran_before;
+	isz failed = t->checks_failed_count - checks_failed_before;
+
+	bool suite_failed = failed > 0 || caught_exception;
+
+	if (suite_failed)
+	{
+		t->suites_failed += 1;
+	}
 
 	LOG(info, "Ran test suite \"%cs\" with %zd checks of which %zd failed\n", name, ran, failed);
 }
 
-void test_expect(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...)
+void test_check(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...)
 {
 	va_list args;
 	va_start(args, fmt);
 
-	test_expect_va(t, condition, file, line, expression, fmt, args);
+	test_check_va(t, condition, file, line, expression, fmt, args);
 
 	va_end(args);
 }
 
-void test_expect_va(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, va_list args)
+void test_check_va(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, va_list args)
 {
-	t->ran_count += 1;
+	t->check_index      += 1;
+	t->checks_ran_count += 1;
 
 	if (condition == false)
 	{
-		t->failed_count += 1;
+		t->checks_failed_count += 1;
 
 		Arena_ScopedTemp {
 			String message = string_format_va(temp, fmt, args);
@@ -3776,9 +3861,11 @@ void test_expect_va(Test_Context *t, bool condition, String file, isz line, Stri
 
 int test_report(Test_Context *t)
 {
-	LOG(info, "Ran %zd tests, %zd failed.", t->ran_count, t->failed_count);
-	return t->failed_count > 0;
+	LOG(info, "Ran %zd suites, %zd failed.", t->suites_ran, t->suites_failed);
+	return t->suites_failed > 0;
 }
+
+#endif
 
 //
 // TLS
@@ -3842,8 +3929,14 @@ void dc_init(int argc, char **argv, DC_Config const *config)
 
 	_G = arena_bootstrap(DC_Context, arena);
 	_G->tctx = tls_allocate();
-	_G->argc = argc;
-	_G->argv = argv;
+
+	_G->argc = (isz)argc;
+	_G->argv = arena_alloc_array_nozero(_G->arena, _G->argc, String);
+
+	for (isz i = 0; i < _G->argc; i += 1)
+	{
+		_G->argv[i] = string_from_cstring(argv[i]);
+	}
 
 	for (isz i = 0; i < Log_Level_COUNT; i += 1)
 	{
