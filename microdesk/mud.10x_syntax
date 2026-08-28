@@ -1,0 +1,91 @@
+# Format: <SettingName>: <Settingvalue>
+# Setting name must appear at start of line and there must be whitespace after the colon.
+# Multiple values can be comma separated or on subsequent lines.
+#
+# Valid settings for colour rules:
+# REGEX()   A regular expression. Colours entire match or first group.
+# WORD()	Matches a word (case sensitive)
+# WORDI()   Matches a word (case insensitive)
+# TEXT()	Match any text in the line (case sensitive)
+# TEXTI()	Match any text in the line (case insensitive)
+#
+# Rules are applied top to bottom and the first rule to colour a character wins,
+# so the rules below go from most specific to least specific.
+
+#----------------------------------------------
+# settings
+
+Extensions:					*.mud
+
+BlockCommentStart:			/*
+BlockCommentEnd:			*/
+
+#----------------------------------------------
+# colour rules
+
+Language.Comment:
+REGEX(//.*)
+
+Language.String:
+REGEX("[^"\\]*(?:\\.[^"\\]*)*")
+REGEX(`[^`]*`)
+
+# tags: @my_tag, or @my_tag(a=1, b=2). Arguments are always parenthesised and are
+# only ever name = value pairs, never objects or arrays.
+Language.Preprocessor:
+REGEX(@[a-zA-Z_]\w*)
+
+# the name of a top level declaration: the identifier after the tags in column 0
+# (@enum Error, @alias(distinct=true) Buffer, @fn(returns=Error) create_instance)
+Language.Class:
+REGEX(^(?:@[a-zA-Z_]\w*(?:\([^)]*\))?[ \t]+)+([a-zA-Z_]\w*))
+
+# names of children: key = value (this also covers tag arguments and tagged
+# members such as @by_ptr desc = Buffer_Desc), key { ... }, key [ ... ], and
+# tagged members opening a container, such as @union _ {
+Language.Variable:
+REGEX(([a-zA-Z_]\w*)[ \t]*=)
+REGEX(^[ \t]*([a-zA-Z_]\w*)[ \t]*[{[])
+REGEX(^[ \t]+(?:@[a-zA-Z_]\w*(?:\([^)]*\))?[ \t]+)+([a-zA-Z_]\w*)[ \t]*[{[])
+
+Language.Keyword:
+WORD(true)
+WORD(false)
+WORD(nil)
+
+Language.Number:
+REGEX(-?\b0[xX][0-9a-fA-F]+)
+REGEX(-?\b0[bB][01]+)
+REGEX(-?\b[0-9]+\.[0-9]*[eE][-+]?[0-9]+)
+REGEX(-?\b[0-9]+[eE][-+]?[0-9]+)
+REGEX(-?\b[0-9]+\.[0-9]*)
+REGEX(-?\.[0-9]+)
+REGEX(-?\b[0-9]+)
+
+# anything left over is a value identifier: type names, enum members in arrays
+Language.Type:
+REGEX(\b[a-zA-Z_]\w*)
+
+Language.Brace:
+TEXT({)
+TEXT(})
+
+Language.SquareBracket:
+TEXT([)
+TEXT(])
+
+Language.Bracket:
+TEXT(()
+TEXT())
+
+Language.Comma:
+TEXT(,)
+
+Language.Operator:
+TEXT(=)
+TEXT(^)
+TEXT(+)
+TEXT(-)
+TEXT(*)
+TEXT(/)
+TEXT(\)

@@ -1,3 +1,100 @@
+/*
+	MUD is a small data description format designed to be hand-written. It provides
+	a JSON-like data model, with the addition of @tag annotations, inspired by Metadesk.
+
+	MUD is distributed as a single header library. Inside one source file, you
+	need to include the header while having MUD_IMPL defined.
+
+		#define MUD_IMPL
+		#include "mud.h"
+
+	MUD does zero memory allocation, the only parsing API is mud_parse_from_string which
+	takes an array of nodes to use as its backing storage. All MUD_STRINGs point back
+	into the original source file.
+
+	Basic usage looks like:
+
+		ptrdiff_t file_size;
+		char const *file = read_entire_file("my_file.mud", &file_size);
+
+		#define MAX_NODE_COUNT (1 << 16)
+		static Mud_Node nodes[MAX_NODE_COUNT];
+
+		Mud_Parser parser;
+		Mud_Parse_Result result = mud_parse_from_string(&parser, nodes, MAX_NODE_COUNT, mud_string(file, file_size));
+
+		if (result.error != Mud_Error_none)
+		{
+			// TODO: Error reporting
+			exit(-1):
+		}
+
+		Mud_Node *root = result.root;
+		for (Mud_EachChild(node, root))
+		{
+			do_stuff_with_node(node);
+		}
+
+	There are three kinds of elements that can appear at the top level of a MUD file:
+
+		// key-value
+		my_value = value
+
+		// array
+		my_array [
+			1
+			2
+		]
+	
+		// object
+		my_object {
+			a = 1
+			b = 2
+		}
+
+	Members of arrays and objects can be delineated by commas or newlines
+
+		my_array  [ 1, 2 ]
+		my_object { a = 1, b = 2 }
+
+	Elements can be tagged to provide an additional dimension of metadata
+
+		@my_tag my_array [ 1, 2 ]
+
+	Tags can receive arguments, which must be a list of key-value pairs
+	
+		@my_tag(arg1=1, arg2=2) my_array [ 1, 2 ]
+
+	Leading and trailing comments are attached to elements
+
+		// Leading comment
+		my_object {
+			member1 = value     // Trailing comment 1
+			member2 [ 1, 2, 3 ] // Trailing comment 2
+		} // Trailing comment 3
+
+	Here, the leading comment and trailing comment 3 are attached to my_object,
+	while trailing comments 1 and 2 are attached to member1 and member2
+
+	There are more defines you can use to configure the library, see below for
+	details.
+
+	MUD uses nil nodes rather than null pointers to signify a node's non-existence.
+	This means you need to use mud_is_nil():
+
+		for (Mud_Node *node = first; !mud_is_nil(node); node = node->next)
+
+		if (!mud_is_nil(node->first_tag))
+		{
+			printf("My node has a tag!\n");
+		}
+
+	This can be disabled by defining MUD_NIL_IS_NULL prior to including mud.h in your
+	source file (so wherever you are including it with MUD_IMPL defined)
+
+	MUD is licensed under the MIT license. See bottom of file for more.
+*/
+
 //
 // Header
 //
@@ -10,12 +107,17 @@
 
 typedef uint8_t Mud_Bool;
 
+// Define to disable nil nodes
+// #define MUD_NIL_IS_NULL
+
+// If you're a savage
 #if defined(MUD_PREFER_UNSIGNED)
 	typedef size_t Mud_Int;
 #else
 	typedef ptrdiff_t Mud_Int;
 #endif
 
+// If you're only using MUD in one translation unit
 #if defined(MUD_STATIC)
 	#define MUD_API static
 #else
@@ -24,6 +126,10 @@ typedef uint8_t Mud_Bool;
 
 #define MUD_INLINE static inline
 
+// If you want to use your own string type, you can define MUD_STRING
+// and the accompanying accessor macros. MUD is written to deal with
+// counted non-owning strings, aka string views / slices, not
+// null-terminated strings or strings which own their own memory.
 #if !defined(MUD_STRING)
 	typedef struct MUD_STRING
 	{
@@ -40,19 +146,9 @@ typedef uint8_t Mud_Bool;
 	#endif
 #endif
 
-MUD_INLINE MUD_STRING mud_string(char const *bytes, Mud_Int count)
-{
-	MUD_STRING result;
-	MUD_STRING_BYTES_ASSIGN(result, bytes);
-	MUD_STRING_COUNT_ASSIGN(result, count);
-	return result;
-}
-
-#define Mud_EachNode(it, first)   Mud_Node *it = first;                 !mud_is_nil(it); it = it->next
-#define Mud_EachChild(it, parent) Mud_Node *it = (parent)->first_child; !mud_is_nil(it); it = it->next
-#define Mud_EachTag(it, parent)   Mud_Node *it = (parent)->first_tag;   !mud_is_nil(it); it = it->next
-
-#define MUD_TEXT(lit) mud_string("" lit, sizeof(lit) - 1)
+//
+// Types
+//
 
 typedef enum Mud_Token
 {
@@ -129,6 +225,7 @@ typedef struct Mud_Parser
 
 	Mud_Node *parent;
 
+	char const *line_start;
 	Mud_Int line;
 	Mud_Int col;
 
@@ -141,6 +238,7 @@ typedef struct Mud_Parser
 	{
 		char const    *start;
 		char const    *end;
+		char const    *line_start;
 		Mud_Int        line;
 		Mud_Int        col;
 		MUD_STRING     value;
@@ -150,6 +248,7 @@ typedef struct Mud_Parser
 	} token;
 
 	Mud_Error error;
+	Mud_Int   error_line_start;
 	Mud_Int   error_line;
 	Mud_Int   error_col;
 
@@ -159,15 +258,33 @@ typedef struct Mud_Parser
 
 typedef struct Mud_Parse_Result
 {
-	Mud_Node  *root;
-	Mud_Error  error;
-	MUD_STRING error_message;
-	Mud_Int    error_line;
-	Mud_Int    error_col;
-	Mud_Int    node_count;
+	Mud_Node   *root;
+	Mud_Error   error;
+	MUD_STRING  error_message;
+	Mud_Int     error_line_start; // byte offset from source
+	Mud_Int     error_line;
+	Mud_Int     error_col;
+	Mud_Int     node_count;
 } Mud_Parse_Result;
 
-MUD_API MUD_STRING mud_token_to_string(Mud_Token tok);
+//
+// API
+//
+
+#define Mud_EachNode(it, first)   Mud_Node *it = first;                 !mud_is_nil(it); it = it->next
+#define Mud_EachChild(it, parent) Mud_Node *it = (parent)->first_child; !mud_is_nil(it); it = it->next
+#define Mud_EachTag(it, parent)   Mud_Node *it = (parent)->first_tag;   !mud_is_nil(it); it = it->next
+
+MUD_INLINE MUD_STRING mud_string(char const *bytes, Mud_Int count)
+{
+	MUD_STRING result;
+	MUD_STRING_BYTES_ASSIGN(result, bytes);
+	MUD_STRING_COUNT_ASSIGN(result, count);
+	return result;
+}
+
+#define MUD_TEXT(lit) mud_string("" lit, sizeof(lit) - 1)
+
 MUD_API Mud_Parse_Result mud_parse_from_string(Mud_Parser *parser, Mud_Node *nodes_buffer, Mud_Int nodes_buffer_size, MUD_STRING source);
 
 MUD_API Mud_Node *mud_nil(void);
@@ -192,9 +309,10 @@ MUD_INLINE void mud_error(Mud_Parser *p, Mud_Node *node, Mud_Error error_code, M
 		node->flags |= Mud_Node_Flag_invalid;
 	}
 
-	p->error      = error_code;
-	p->error_line = p->token.line;
-	p->error_col  = p->token.col;
+	p->error            = error_code;
+	p->error_line_start = p->token.line_start - MUD_STRING_BYTES(p->source);
+	p->error_line       = p->token.line;
+	p->error_col        = p->token.col;
 
 	p->message_length = 0;
 	for (Mud_Int i = 0; i < MUD_STRING_COUNT(message); i += 1)
@@ -283,8 +401,9 @@ MUD_INLINE Mud_Bool mud_char_is_digit(char c)
 
 MUD_INLINE void mud_next_token(Mud_Parser *p)
 {
-	char const *start = p->at;
-	char const *end   = p->end;
+	char const *start      = p->at;
+	char const *end        = p->end;
+	char const *line_start = p->line_start;
 
 	Mud_Int line = 1;
 	Mud_Int col  = 0;
@@ -296,9 +415,10 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 
 	while (!mud_at_end(p))
 	{
-		start = p->at;
-		line  = p->line;
-		col   = p->col;
+		start      = p->at;
+		line       = p->line;
+		col        = p->col;
+		line_start = p->line_start;
 
 		switch (p->at[0])
 		{
@@ -326,6 +446,7 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 			{
 				mud_next(p);
 
+				p->line_start = p->at;
 				p->line += 1;
 				p->col   = 0;
 
@@ -445,8 +566,16 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 
 					while (p->at + 1 < end && !(p->at[0] == '*' && p->at[1] == '/'))
 					{
-						if (p->at[0] == '\n') p->line += 1;
-						mud_next(p);
+						if (p->at[0] == '\n')
+						{
+							mud_next(p);
+							p->line_start = p->at;
+							p->line += 1;
+						}
+						else
+						{
+							mud_next(p);
+						}
 					}
 					mud_next(p);
 					mud_next(p);
@@ -542,12 +671,13 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 	}
 
 done:
-	p->token.start = start;
-	p->token.end   = p->at;
-	p->token.value = mud_string(p->token.start, (Mud_Int)(p->token.end - p->token.start));
-	p->token.line  = line;
-	p->token.col   = col;
-	p->token.flags = flags;
+	p->token.start       = start;
+	p->token.end         = p->at;
+	p->token.value       = mud_string(p->token.start, (Mud_Int)(p->token.end - p->token.start));
+	p->token.line_start  = line_start;
+	p->token.line        = line;
+	p->token.col         = col;
+	p->token.flags       = flags;
 
 	switch (p->token.kind)
 	{
@@ -603,8 +733,8 @@ MUD_INLINE Mud_Node *mud_allocate_node(Mud_Parser *p)
 	result->first_child      = mud_nil();
 	result->first_tag        = mud_nil();
 	result->flags            = 0;
-	result->line             = -1;
-	result->col              = -1;
+	result->line             = 1;
+	result->col              = 0;
 	result->name             = mud_string(NULL, 0);
 	result->value            = mud_string(NULL, 0);
 	result->value_unquoted   = mud_string(NULL, 0);
@@ -703,21 +833,14 @@ MUD_INLINE void mud_parse_object_style_value(Mud_Parser *p, Mud_Node *node, Mud_
 		if (p->token.kind == '[') bracket_depth += 1;
 		if (p->token.kind == '{') brace_depth   += 1;
 		if (p->token.kind == '(') paren_depth   += 1;
-		if (p->token.kind == ']')
-		{
-			if (bracket_depth == 0) break;
-			bracket_depth -= 1;
-		}
-		if (p->token.kind == '}')
-		{
-			if (brace_depth == 0) break;
-			brace_depth -= 1;
-		}
-		if (p->token.kind == ')') paren_depth   -= 1;
+
+		if (p->token.kind == ']' && bracket_depth > 0) bracket_depth -= 1;
+		if (p->token.kind == '}' && brace_depth   > 0) brace_depth   -= 1;
+		if (p->token.kind == ')' && paren_depth   > 0) paren_depth   -= 1;
 
 		if (p->token.kind == ',')
 		{
-			// If the comma is not nested, or if it was an inserted comma, then break.
+			// If the comma is not nested, or if it was a newline, then break.
 			if ((bracket_depth == 0 && brace_depth == 0 && paren_depth == 0) || p->token.is_newline)
 			{
 				break;
@@ -996,9 +1119,10 @@ Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mu
 		mud_parse_element(p, result.root, true, Mud_Token_eof);
 		result.root->flags |= Mud_Node_Flag_is_root;
 
-		result.error      = p->error;
-		result.error_line = p->error_line;
-		result.error_col  = p->error_col;
+		result.error            = p->error;
+		result.error_line_start = p->error_line_start;
+		result.error_line       = p->error_line;
+		result.error_col        = p->error_col;
 	}
 	else
 	{
@@ -1013,6 +1137,9 @@ Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mu
 
 Mud_Node *mud_nil(void)
 {
+#if defined(MUD_NIL_IS_NULL)
+	return NULL;
+#else
 	static Mud_Node _mud_nil = {
 		&_mud_nil,
 		&_mud_nil,
@@ -1020,6 +1147,7 @@ Mud_Node *mud_nil(void)
 		&_mud_nil,
 	};
 	return &_mud_nil;
+#endif
 }
 
 Mud_Bool mud_is_nil(Mud_Node *node)
@@ -1062,3 +1190,25 @@ Mud_Bool mud_child_is_true(Mud_Node *node, MUD_STRING name)
 }
 
 #endif
+
+// MIT License
+// 
+// Copyright (c) 2026 Daniël Cornelisse
+// 
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+// 
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
