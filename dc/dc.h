@@ -87,6 +87,9 @@ typedef int32_t rune;
 #define PASTE_(a, b) a##b
 #define PASTE(a, b) PASTE_(a, b)
 
+#define HAS_ANY_FLAGS(a, b) (((a) & (b)) != 0)
+#define HAS_ALL_FLAGS(a, b) (((a) & (b)) == (b))
+
 #define PAD(n) char PASTE(pad__, __LINE__)[n]
 
 #define ArrayCount(x) ((isz)(sizeof(x) / sizeof((x)[0])))
@@ -388,7 +391,7 @@ fn void arena_reset_temp_arenas(void);
 // Usage: printf("%.*s", Sx(string));
 #define Sx(str) (int)(str).count, (str).chars
 
-#define S16(text) DC_COMPOUND_LIT(String16) { (u16 *)(L"" text), sizeof(L"" text) / sizeof(u16) - 1 }
+#define S16(text) DC_COMPOUND_LIT(String16) { (u16 *)(L"" text), sizeof(L"" text) / sizeof(wchar_t) - 1 }
 
 // Single Character
 fn bool char_is_whitespace(char c);
@@ -549,8 +552,7 @@ fn String_Pair string_split_line(String string);
 fn String_Pair string_split_around(String string, String separator);
 fn String_Pair string_split_around_char(String string, char c);
 /*
-	A word for the purposes of this function is just any uninterrupted
-	chain of non-whitespace characters
+	A word for the purposes of this function is just any uninterrupted chain of non-whitespace characters
 */
 fn String_Pair string_split_word(String string);
 fn String_Pair string_split_identifier(String string);
@@ -561,8 +563,21 @@ fn String string_iter_line(String *iter);
 #define String_EachLine(line, lines) String iter = lines, line = string_iter_line(&iter); !string_empty(line); line = string_iter_line(&iter)
 
 typedef struct Parse_Number_Result {
+	/*
+		is_valid is true even on overflow, since it is still a properly parsed integer, it's just been saturated.
+	*/
 	b32 is_valid;
+	/*
+		-1 for underflow, 1 for overflow, 0 if nicely in range. 
+		On under/overflow the respective value will be at the appropriate min/max value for the given type:
+		string_parse_i32(INT32_MAX_PLUS_ONE_STRING) .value_i32 == INT32_MAX
+		string_parse_i32(INT32_MIN_MINUS_ONE_STRING).value_i32 == INT32_MIN
+	*/
 	i32 overflowed;
+	/*
+		How far to skip the string ahead to skip over the parsed number
+	*/
+	isz advance;
 	union
 	{
 		i64 value_i64;
@@ -576,7 +591,6 @@ typedef struct Parse_Number_Result {
 		f64 value_f64;
 		f32 value_f32;
 	};
-	isz advance;
 } Parse_Number_Result;
 
 fn Parse_Number_Result string_parse_i64(String string);
@@ -2738,17 +2752,15 @@ Parse_Number_Result string_parse_i64(String string)
 	i32 sign = 1;
 	while (!string_empty(iter))
 	{
-		/**/ if (string.chars[0] == '-') { sign *= -1; iter = string_skip(iter, 1); }
-		else if (string.chars[0] == '+') {             iter = string_skip(iter, 1); }
+		/**/ if (iter.chars[0] == '-') { sign *= -1; iter = string_skip(iter, 1); }
+		else if (iter.chars[0] == '+') {             iter = string_skip(iter, 1); }
 		else break;
 	}
 
-	Parse_Number_Result result = string_parse_u64(string);
+	Parse_Number_Result result = string_parse_u64(iter);
 	result.advance += iter.chars - string.chars;
 
 	u64 max_value = (u64)INT64_MAX;
-	if (sign == -1) max_value += 1;
-
 	if (result.value_u64 >= max_value)
 	{
 		result.value_i64 = sign == 1 ? INT64_MAX : INT64_MIN;
@@ -2951,8 +2963,8 @@ isz sb_appends_ex(String_Builder *sb, String s, String_Builder_Append_Flags flag
 			for (isz i = 0; i < copied; i += 1)
 			{
 				char c = at[i];
-				if (flags & String_Builder_Append_Flag_to_lower) c = char_to_lower(c);
-				if (flags & String_Builder_Append_Flag_to_upper) c = char_to_upper(c);
+				/**/ if (flags & String_Builder_Append_Flag_to_lower) c = char_to_lower(c);
+				else if (flags & String_Builder_Append_Flag_to_upper) c = char_to_upper(c);
 				chunk->bytes[chunk->count + i] = c;
 			}
 		}
@@ -4112,7 +4124,7 @@ void test_run(Test_Context *t, String name, Test_Suite suite)
 		t->suites_failed += 1;
 	}
 
-	LOG(info, "Ran test suite \"%cs\" with %zd checks of which %zd failed\n", name, ran, failed);
+	LOG(info, "Ran test suite \"%.*s\" with %zd checks of which %zd failed", Sx(name), ran, failed);
 }
 
 void test_check(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...)
@@ -4138,11 +4150,11 @@ void test_check_va(Test_Context *t, bool condition, String file, isz line, Strin
 			String message = string_format_va(temp, fmt, args);
 			if (!string_empty(message))
 			{
-				logf(Log_Level_error, file, line, "TEST_EXPECT(%cs) failed: %cs", expression, message);
+				logf(Log_Level_error, file, line, "TEST_EXPECT(%.*s) failed: %.*s", Sx(expression), Sx(message));
 			}
 			else
 			{
-				logf(Log_Level_error, file, line, "TEST_EXPECT(%cs) failed!", expression);
+				logf(Log_Level_error, file, line, "TEST_EXPECT(%.*s) failed!", Sx(expression));
 			}
 		}
 	}

@@ -48,6 +48,10 @@ MUD_INLINE MUD_STRING mud_string(char const *bytes, Mud_Int count)
 	return result;
 }
 
+#define Mud_EachNode(it, first)   Mud_Node *it = first;                 !mud_is_nil(it); it = it->next
+#define Mud_EachChild(it, parent) Mud_Node *it = (parent)->first_child; !mud_is_nil(it); it = it->next
+#define Mud_EachTag(it, parent)   Mud_Node *it = (parent)->first_tag;   !mud_is_nil(it); it = it->next
+
 #define MUD_TEXT(lit) mud_string("" lit, sizeof(lit) - 1)
 
 typedef enum Mud_Token
@@ -65,13 +69,13 @@ enum
 {
 	Mud_Node_Flag_is_array             = (1u << 0),
 	Mud_Node_Flag_is_object            = (1u << 1),
-	Mud_Node_Flag_is_container         = Mud_Node_Flag_is_array|Mud_Node_Flag_is_object,
 	Mud_Node_Flag_is_tag               = (1u << 2),
-	Mud_Node_Flag_has_name             = (1u << 3),
-	Mud_Node_Flag_has_value            = (1u << 4),
-	Mud_Node_Flag_is_root              = (1u << 5),
-	Mud_Node_Flag_is_quoted_string     = (1u << 6),
-	Mud_Node_Flag_is_backticked_string = (1u << 7),
+	Mud_Node_Flag_has_children         = (1u << 3),
+	Mud_Node_Flag_has_name             = (1u << 4),
+	Mud_Node_Flag_has_value            = (1u << 5),
+	Mud_Node_Flag_is_root              = (1u << 6),
+	Mud_Node_Flag_is_quoted_string     = (1u << 7),
+	Mud_Node_Flag_is_backticked_string = (1u << 8),
 	Mud_Node_Flag_is_identifier        = (1u << 9),
 	Mud_Node_Flag_is_number            = (1u << 10),
 	Mud_Node_Flag_number_is_negative   = (1u << 11),
@@ -83,6 +87,7 @@ enum
 	Mud_Node_Flag_is_false             = (1u << 17),
 	Mud_Node_Flag_is_bool              = Mud_Node_Flag_is_true|Mud_Node_Flag_is_false,
 	Mud_Node_Flag_is_nil               = (1u << 18),
+	Mud_Node_Flag_invalid              = (1u << 31),
 };
 
 typedef enum Mud_Error
@@ -145,6 +150,8 @@ typedef struct Mud_Parser
 	} token;
 
 	Mud_Error error;
+	Mud_Int   error_line;
+	Mud_Int   error_col;
 
 	Mud_Int message_length;
 	char    message_buffer[256];
@@ -152,13 +159,23 @@ typedef struct Mud_Parser
 
 typedef struct Mud_Parse_Result
 {
+	Mud_Node  *root;
 	Mud_Error  error;
-	MUD_STRING error_message; 
+	MUD_STRING error_message;
+	Mud_Int    error_line;
+	Mud_Int    error_col;
 	Mud_Int    node_count;
 } Mud_Parse_Result;
 
 MUD_API MUD_STRING mud_token_to_string(Mud_Token tok);
 MUD_API Mud_Parse_Result mud_parse_from_string(Mud_Parser *parser, Mud_Node *nodes_buffer, Mud_Int nodes_buffer_size, MUD_STRING source);
+
+MUD_API Mud_Node *mud_nil(void);
+MUD_API Mud_Bool mud_is_nil(Mud_Node *node);
+MUD_API Mud_Node *mud_get_tag(Mud_Node *node, MUD_STRING name);
+MUD_API Mud_Bool mud_tag_is_true(Mud_Node *node, MUD_STRING name);
+MUD_API Mud_Node *mud_get_child(Mud_Node *node, MUD_STRING name);
+MUD_API Mud_Bool mud_child_is_true(Mud_Node *node, MUD_STRING name);
 
 #endif
 
@@ -168,9 +185,17 @@ MUD_API Mud_Parse_Result mud_parse_from_string(Mud_Parser *parser, Mud_Node *nod
 
 #if defined(MUD_IMPL)
 
-MUD_INLINE void mud_error(Mud_Parser *p, Mud_Error error_code, MUD_STRING message)
+MUD_INLINE void mud_error(Mud_Parser *p, Mud_Node *node, Mud_Error error_code, MUD_STRING message)
 {
-	p->error = error_code;
+	if (!mud_is_nil(node))
+	{
+		node->flags |= Mud_Node_Flag_invalid;
+	}
+
+	p->error      = error_code;
+	p->error_line = p->token.line;
+	p->error_col  = p->token.col;
+
 	p->message_length = 0;
 	for (Mud_Int i = 0; i < MUD_STRING_COUNT(message); i += 1)
 	{
@@ -212,6 +237,16 @@ MUD_INLINE Mud_Bool mud_next(Mud_Parser *p)
 		return 1;
 	}
 	return 0;
+}
+
+MUD_INLINE Mud_Bool mud_string_match(MUD_STRING a, MUD_STRING b)
+{
+	if (MUD_STRING_COUNT(a) != MUD_STRING_COUNT(b)) return 0;
+	for (Mud_Int i = 0; i < MUD_STRING_COUNT(a); i += 1)
+	{
+		if (MUD_STRING_BYTES(a)[i] != MUD_STRING_BYTES(b)[i]) return 0;
+	}
+	return 1;
 }
 
 MUD_INLINE Mud_Bool mud_at_end(Mud_Parser *p)
@@ -418,7 +453,7 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 
 					if (p->at >= end)
 					{
-						mud_error(p, Mud_Error_syntax_error, MUD_TEXT("unexpected end of file in block comment"));
+						mud_error(p, NULL, Mud_Error_syntax_error, MUD_TEXT("unexpected end of file in block comment"));
 						p->token.kind = Mud_Token_eof;
 						goto done;
 					}
@@ -451,7 +486,7 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 
 				if (p->at[0] != delimiter)
 				{
-					mud_error(p, Mud_Error_syntax_error, MUD_TEXT("unexpected end of file in string comment"));
+					mud_error(p, NULL, Mud_Error_syntax_error, MUD_TEXT("unexpected end of file in string comment"));
 					p->token.kind = Mud_Token_eof;
 				}
 
@@ -467,18 +502,21 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 				{
 					p->token.kind = Mud_Token_identifier;
 					flags |= Mud_Node_Flag_is_identifier|Mud_Node_Flag_is_true;
+					goto done;
 				}
 				else if (mud_match_keyword(p, MUD_TEXT("false")))
 				{
 					p->token.kind = Mud_Token_identifier;
 					flags |= Mud_Node_Flag_is_identifier|Mud_Node_Flag_is_false;
+					goto done;
 				}
 				else if (mud_match_keyword(p, MUD_TEXT("nil")))
 				{
 					p->token.kind = Mud_Token_identifier;
 					flags |= Mud_Node_Flag_is_identifier|Mud_Node_Flag_is_nil;
+					goto done;
 				}
-				if ((p->at[0] >= 'a' && p->at[0] <= 'z') || (p->at[0] >= 'A' && p->at[0] <= 'Z') || p->at[0] == '_')
+				else if ((p->at[0] >= 'a' && p->at[0] <= 'z') || (p->at[0] >= 'A' && p->at[0] <= 'Z') || p->at[0] == '_')
 				{
 					mud_next(p);
 
@@ -552,7 +590,102 @@ MUD_INLINE Mud_Bool mud_eat_token(Mud_Parser *p, Mud_Token kind)
 	return result;
 }
 
-MUD_INLINE MUD_STRING mud_parse_equals_style_value(Mud_Parser *p, Mud_Node_Flags *out_flags)
+MUD_INLINE Mud_Node *mud_allocate_node(Mud_Parser *p)
+{
+	if (p->out_nodes_used >= p->out_node_capacity)
+	{
+		return mud_nil();
+	}
+
+	Mud_Node *result = &p->out_nodes[p->out_nodes_used++];
+	result->parent           = p->parent;
+	result->next             = mud_nil();
+	result->first_child      = mud_nil();
+	result->first_tag        = mud_nil();
+	result->flags            = 0;
+	result->line             = -1;
+	result->col              = -1;
+	result->name             = mud_string(NULL, 0);
+	result->value            = mud_string(NULL, 0);
+	result->value_unquoted   = mud_string(NULL, 0);
+	result->leading_comment  = mud_string(NULL, 0);
+	result->trailing_comment = mud_string(NULL, 0);
+
+	return result;
+}
+
+MUD_INLINE void mud_set_name(Mud_Node *node, MUD_STRING name)
+{
+	node->name = name;
+
+	if (MUD_STRING_COUNT(node->name) > 0)
+	{
+		node->flags |= Mud_Node_Flag_has_name;
+	}
+}
+
+MUD_INLINE void mud_set_value(Mud_Node *node, MUD_STRING value)
+{
+	node->value          = value;
+	node->value_unquoted = value;
+
+	if (node->flags & (Mud_Node_Flag_is_quoted_string|Mud_Node_Flag_is_backticked_string))
+	{
+		MUD_STRING_BYTES_ASSIGN(node->value_unquoted, MUD_STRING_BYTES(node->value) + 1);
+		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 1);
+	}
+
+	if (MUD_STRING_COUNT(node->value) > 0)
+	{
+		node->flags |= Mud_Node_Flag_has_value;
+	}
+}
+
+MUD_INLINE void mud_add_node(Mud_Node **first, Mud_Node **last, Mud_Node *node)
+{
+	if (mud_is_nil(*first))
+	{
+		*first = node;
+		*last  = node;
+	}
+	else
+	{
+		(*last)->next = node;
+		*last = node;
+	}
+}
+
+MUD_INLINE MUD_STRING mud_parse_comment(Mud_Parser *p)
+{
+	MUD_STRING comment = mud_string(NULL, 0);
+
+	if (mud_peek_token(p, Mud_Token_comment))
+	{
+		char const *start = p->token.start;
+		char const *end   = p->token.end;
+
+		while (mud_peek_token(p, Mud_Token_comment))
+		{
+			end = p->token.end;
+			mud_next_token(p);
+		}
+
+		comment = mud_string(start, end - start);
+	}
+
+	return comment;
+}
+
+MUD_INLINE void mud_memset(void *mem, uint8_t value, Mud_Int count)
+{
+	uint8_t *bytes = (uint8_t *)mem;
+	for (Mud_Int i = 0; i < count; i += 1)
+	{
+		bytes[i] = value;
+	}
+}
+
+MUD_INLINE void mud_parse_object_style_value(Mud_Parser *p, Mud_Node *node, Mud_Token closing)
 {
 	char const *start = p->token.start;
 	char const *end   = p->token.start;
@@ -565,7 +698,7 @@ MUD_INLINE MUD_STRING mud_parse_equals_style_value(Mud_Parser *p, Mud_Node_Flags
 
 	Mud_Int iter = 0;
 
-	while (mud_keep_parsing(p) && !mud_peek_token(p, Mud_Token_comment))
+	while (mud_keep_parsing(p) && !mud_peek_token(p, Mud_Token_comment) && !mud_peek_token(p, closing))
 	{
 		if (p->token.kind == '[') bracket_depth += 1;
 		if (p->token.kind == '{') brace_depth   += 1;
@@ -591,6 +724,14 @@ MUD_INLINE MUD_STRING mud_parse_equals_style_value(Mud_Parser *p, Mud_Node_Flags
 			}
 		}
 
+		if (p->token.kind == closing)
+		{
+			if (bracket_depth == 0 && brace_depth == 0 && paren_depth == 0)
+			{
+				break;
+			}
+		}
+
 		iter += 1;
 
 		end   = p->token.end;
@@ -600,167 +741,129 @@ MUD_INLINE MUD_STRING mud_parse_equals_style_value(Mud_Parser *p, Mud_Node_Flags
 	}
 
 	// You only get flags if there was only a single token.
-	if (iter == 1)
+	if (iter != 1)
 	{
-		*out_flags |= flags;
+		flags = 0;
 	}
 
-	MUD_STRING result = mud_string(start, (Mud_Int)(end - start));
-	return result;
+	node->flags         |= flags;
+	node->value          = mud_string(start, (Mud_Int)(end - start));
+	node->value_unquoted = node->value;
+
+	if (node->flags & (Mud_Node_Flag_is_quoted_string|Mud_Node_Flag_is_backticked_string))
+	{
+		MUD_STRING_BYTES_ASSIGN(node->value_unquoted, MUD_STRING_BYTES(node->value) + 1);
+		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 1);
+	}
+
+	if (MUD_STRING_COUNT(node->value) > 0)
+	{
+		node->flags |= Mud_Node_Flag_has_value;
+	}
 }
 
-MUD_INLINE Mud_Node *mud_parse_list(Mud_Parser *p, Mud_Bool has_names, Mud_Token end_token);
-
-MUD_INLINE Mud_Node *mud_allocate_node(Mud_Parser *p)
+MUD_INLINE void mud_parse_array_style_value(Mud_Parser *p, Mud_Node *node)
 {
-	if (p->out_nodes_used >= p->out_node_capacity)
+	node->flags         |= p->token.flags;
+	node->value          = p->token.value;
+	node->value_unquoted = node->value;
+
+	if (!mud_eat_token(p, Mud_Token_identifier) && !mud_eat_token(p, Mud_Token_number) && !mud_eat_token(p, Mud_Token_string))
 	{
-		return NULL;
+		mud_error(p, node, Mud_Error_syntax_error, MUD_TEXT("Array values must be an identifier, number, or string"));
+		node->flags |= Mud_Node_Flag_invalid;
 	}
 
-	Mud_Node *result = &p->out_nodes[p->out_nodes_used++];
-	return result;
+	if (node->flags & (Mud_Node_Flag_is_quoted_string|Mud_Node_Flag_is_backticked_string))
+	{
+		MUD_STRING_BYTES_ASSIGN(node->value_unquoted, MUD_STRING_BYTES(node->value) + 1);
+		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 1);
+	}
+
+	if (MUD_STRING_COUNT(node->value) > 0)
+	{
+		node->flags |= Mud_Node_Flag_has_value;
+	}
 }
 
-Mud_Node *mud_parse_node(Mud_Parser *p, MUD_STRING name, Mud_Bool value_with_equals, Mud_Bool can_have_value)
+MUD_INLINE void mud_parse_tag_arguments(Mud_Parser *p, Mud_Node *node)
 {
-	Mud_Node *result = mud_allocate_node(p);
+	Mud_Node *first_child = mud_nil();
+	Mud_Node *last_child  = mud_nil();
 
-	if (result == NULL)
+	while (mud_keep_parsing(p))
 	{
-		mud_error(p, Mud_Error_out_of_nodes, MUD_TEXT("Ran out of nodes!"));
-		return NULL;
-	}
+		MUD_STRING name = p->token.value;
 
-	result->parent = p->parent;
-	p->parent = result;
-
-	Mud_Int line = p->token.line;
-	Mud_Int col  = p->token.col;
-
-	Mud_Node_Flags flags = 0;
-
-	MUD_STRING value          = MUD_TEXT("");
-	MUD_STRING value_unquoted = MUD_TEXT("");
-
-	Mud_Node *first_child = NULL;
-	if (mud_eat_token(p, '{'))
-	{
-		value = p->token.value;
-		flags |= Mud_Node_Flag_is_object;
-		first_child = mud_parse_list(p, 1, '}');
-	}
-	else if (mud_eat_token(p, '['))
-	{
-		value = p->token.value;
-		flags |= Mud_Node_Flag_is_array;
-		first_child = mud_parse_list(p, 0, ']');
-	}
-	else if (can_have_value)
-	{
-		if (value_with_equals && !mud_eat_token(p, '='))
+		if (!mud_eat_token(p, Mud_Token_identifier))
 		{
-			mud_error(p, Mud_Error_syntax_error, MUD_TEXT("Expected {, [ or ="));
+			mud_error(p, node, Mud_Error_syntax_error, MUD_TEXT("Expected identifier"));
 			goto bail;
 		}
 
-		if (value_with_equals)
+		Mud_Node *child = mud_allocate_node(p);
+
+		mud_set_name(child, name);
+		child->line = p->token.line;
+		child->col  = p->token.col;
+
+		if (mud_eat_token(p, '='))
 		{
-			value = mud_parse_equals_style_value(p, &flags);
-		}
-		else if (p->token.kind == Mud_Token_identifier || p->token.kind == Mud_Token_string || p->token.kind == Mud_Token_number)
-		{
-			value  = p->token.value;
-			flags |= p->token.flags;
-			mud_next_token(p);
+			mud_parse_object_style_value(p, child, ')');
 		}
 		else
 		{
-			mud_error(p, Mud_Error_syntax_error, MUD_TEXT("Values in arrays must be identifiers, strings, or numbers"));
+			mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Tag arguments must be in the form 'name = value'"));
+			goto bail;
 		}
 
-		if (flags & (Mud_Node_Flag_is_quoted_string|Mud_Node_Flag_is_backticked_string))
+		mud_add_node(&first_child, &last_child, child);
+
+		if (mud_eat_token(p, ')'))
 		{
-			MUD_STRING_BYTES_ASSIGN(value_unquoted, MUD_STRING_BYTES(value) + 1);
-			MUD_STRING_COUNT(value_unquoted) = MUD_STRING_COUNT(value) - 1;
-			if (MUD_STRING_COUNT(value) < 0)
-			{
-				MUD_STRING_BYTES_ASSIGN(value_unquoted, NULL);
-				MUD_STRING_COUNT(value_unquoted) = 0;
-			}
+			break;
 		}
-
-		flags |= Mud_Node_Flag_has_value;
+		else if (!mud_eat_token(p, ','))
+		{
+			mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Expected , or ) after tag argument"));
+			goto bail;
+		}
 	}
-
-	p->parent = result->parent;
-
-	if (MUD_STRING_COUNT(name) > 0)
-	{
-		flags |= Mud_Node_Flag_has_name;
-	}
-
-	if (MUD_STRING_COUNT(value_unquoted) == 0)
-	{
-		value_unquoted = value;
-	}
-
-	result->first_child      = first_child;
-	result->flags            = flags;
-	result->line             = line;
-	result->col              = col;
-	result->name             = name;
-	result->value            = value;
-	result->value_unquoted   = value_unquoted;
-	result->leading_comment  = MUD_TEXT("");
-	result->trailing_comment = MUD_TEXT("");
 
 bail:
-	return result;
+	node->first_child = first_child;
 }
 
-MUD_INLINE Mud_Bool mud_skip_newline(Mud_Parser *p)
+MUD_INLINE void mud_parse_element(Mud_Parser *p, Mud_Node *node, bool is_object, Mud_Token end_token)
 {
-	if (p->token.is_newline)
+	if (is_object)
 	{
-		mud_next_token(p);
-		return 1;
+		node->flags |= Mud_Node_Flag_is_object;
+	}
+	else
+	{
+		node->flags |= Mud_Node_Flag_is_array;
 	}
 
-	return 0;
-}
-
-MUD_INLINE MUD_STRING mud_parse_comment(Mud_Parser *p)
-{
-	MUD_STRING comment = MUD_TEXT("");
-
-	if (mud_peek_token(p, Mud_Token_comment))
-	{
-		char const *start = p->token.start;
-		char const *end   = p->token.end;
-
-		while (mud_peek_token(p, Mud_Token_comment))
-		{
-			end = p->token.end;
-			mud_next_token(p);
-		}
-
-		comment = mud_string(start, end - start);
-	}
-
-	return comment;
-}
-
-Mud_Node *mud_parse_list(Mud_Parser *p, Mud_Bool has_names, Mud_Token end_token)
-{
-	Mud_Node *first_child   = NULL;
-	Mud_Node *last_child    = NULL;
-	Mud_Node *first_tag     = NULL;
-	Mud_Node *last_tag      = NULL;
+	Mud_Node *first_child = mud_nil();
+	Mud_Node *last_child  = mud_nil();
 
 	while (mud_keep_parsing(p))
 	{
 		MUD_STRING leading_comment = mud_parse_comment(p);
+
+		// Allow empty lists, and make sure comments before the end token don't cause problems.
+		if (mud_eat_token(p, end_token))
+		{
+			break;
+		}
+
+		Mud_Node *child = mud_allocate_node(p);
+
+		p->parent = child;
+
+		Mud_Node *first_tag = mud_nil();
+		Mud_Node *last_tag  = mud_nil();
 
 		while (mud_eat_token(p, '@'))
 		{
@@ -768,112 +871,107 @@ Mud_Node *mud_parse_list(Mud_Parser *p, Mud_Bool has_names, Mud_Token end_token)
 
 			if (!mud_eat_token(p, Mud_Token_identifier))
 			{
-				mud_error(p, Mud_Error_syntax_error, MUD_TEXT("Expected identifier after @"));
+				mud_error(p, NULL, Mud_Error_syntax_error, MUD_TEXT("Expected identifier after '@'"));
 				goto bail;
 			}
 
-			Mud_Node *tag = mud_parse_node(p, name, 0, 0);
+			Mud_Node *tag = mud_allocate_node(p);
+			tag->flags |= Mud_Node_Flag_is_tag;
 
-			if (tag != NULL)
+			mud_set_name(tag, name);
+
+			p->parent = tag;
+
+			if (mud_eat_token(p, '('))
 			{
-				tag->flags |= Mud_Node_Flag_is_tag;
-				if (first_tag == NULL)
-				{
-					first_tag = last_tag = tag;
-				}
-				else
-				{
-					last_tag->next = tag;
-					last_tag = tag;
-				}
+				mud_parse_tag_arguments(p, tag);
 			}
 
-			mud_skip_newline(p);
+			if (!mud_is_nil(tag->first_child))
+			{
+				tag->flags |= Mud_Node_Flag_has_children;
+			}
+
+			p->parent = tag->parent;
+
+			// Consume a newline is it if there so that we can attach to nodes on the next line without issue.
+			if (p->token.is_newline) mud_next_token(p);
+		
+			mud_add_node(&first_tag, &last_tag, tag);
 		}
 
-		// Allow empty lists
-		if (!mud_peek_token(p, end_token))
+		MUD_STRING name = mud_string(NULL, 0);
+		
+		if (is_object)
 		{
-			MUD_STRING name = MUD_TEXT("");
+			name = p->token.value;
 
-			if (has_names)
+			if (!mud_eat_token(p, Mud_Token_identifier))
 			{
-				name = p->token.value;
-
-				if (!mud_eat_token(p, Mud_Token_identifier))
-				{
-					mud_error(p, Mud_Error_syntax_error, MUD_TEXT("Expected identifier"));
-					goto bail;
-				}
-
-				mud_skip_newline(p);
-			}
-
-			Mud_Node *child = mud_parse_node(p, name, has_names, 1);
-
-			if (child != NULL)
-			{
-				child->first_tag = first_tag;
-
-				first_tag = NULL;
-				last_tag  = NULL;
-
-				child->leading_comment = leading_comment;
-				leading_comment = MUD_TEXT("");
-
-				if (first_child == NULL)
-				{
-					first_child = last_child = child;
-				}
-				else
-				{
-					last_child->next = child;
-					last_child = child;
-				}
-			}
-			else
-			{
+				mud_error(p, node, Mud_Error_syntax_error, MUD_TEXT("Expected identifier"));
 				goto bail;
 			}
 		}
 
-		Mud_Bool ate_comma = 0;
+		mud_set_name(child, name);
+		child->line            = p->token.line;
+		child->col             = p->token.col;
+		child->first_tag       = first_tag;
+		child->leading_comment = leading_comment;
 
-		while (!p->token.is_newline && mud_eat_token(p, ',')) ate_comma = 1;
-
-		MUD_STRING trailing_comment = mud_parse_comment(p);
-
-		if (last_child != NULL)
+		if (mud_eat_token(p, '{'))
 		{
-			last_child->trailing_comment = trailing_comment;
+			mud_parse_element(p, child, true, '}');
+		}
+		else if (mud_eat_token(p, '['))
+		{
+			mud_parse_element(p, child, false, ']');
+		}
+		else if (is_object && mud_eat_token(p, '='))
+		{
+			mud_parse_object_style_value(p, child, end_token);
+		}
+		else if (!is_object)
+		{
+			mud_parse_array_style_value(p, child);
+		}
+		else
+		{
+			mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Object children must be followed by {, [ or = delineating the start of an object, array, or value respectively"));
+			goto bail;
 		}
 
-		while (mud_eat_token(p, ','))
+		p->parent = child->parent;
+
+		mud_add_node(&first_child, &last_child, child);
+
+		// Feels a little messy.
+		Mud_Bool ate_comma = !p->token.is_newline && mud_eat_token(p, ',');
+
+		if (mud_peek_token(p, Mud_Token_comment))
 		{
-			ate_comma = 1;
+			child->trailing_comment = mud_parse_comment(p);
 		}
 
-		if (!mud_keep_parsing(p) || mud_eat_token(p, end_token))
+		ate_comma |= mud_eat_token(p, ',');
+
+		if (mud_eat_token(p, end_token))
 		{
 			break;
 		}
 		else if (!ate_comma)
 		{
-			mud_error(p, Mud_Error_syntax_error, MUD_TEXT("Expected comma"));
+			mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Expected comma"));
 			goto bail;
 		}
 	}
 
 bail:
-	return first_child;
-}
+	node->first_child = first_child;
 
-MUD_INLINE void mud_memset(void *mem, uint8_t value, Mud_Int count)
-{
-	uint8_t *bytes = (uint8_t *)mem;
-	for (Mud_Int i = 0; i < count; i += 1)
+	if (!mud_is_nil(node->first_child))
 	{
-		bytes[i] = value;
+		node->flags |= Mud_Node_Flag_has_children;
 	}
 }
 
@@ -890,27 +988,77 @@ Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mu
 	mud_next_token(p);
 
 	Mud_Parse_Result result = {0};
-	result.error = Mud_Error_out_of_nodes;
+	result.root = mud_allocate_node(p);
+	mud_set_name(result.root, MUD_TEXT("root"));
 
-	Mud_Node *root = mud_allocate_node(p);
-
-	if (root != NULL)
+	if (!mud_is_nil(result.root))
 	{
-		result.error = Mud_Error_none;
+		mud_parse_element(p, result.root, true, Mud_Token_eof);
+		result.root->flags |= Mud_Node_Flag_is_root;
 
-		root->name  = MUD_TEXT("root");
-		root->line  = 1;
-		root->flags = Mud_Node_Flag_is_object|Mud_Node_Flag_has_name|Mud_Node_Flag_is_root;
-
-		p->parent = root;
-
-		root->first_child = mud_parse_list(p, 1, Mud_Token_eof);
+		result.error      = p->error;
+		result.error_line = p->error_line;
+		result.error_col  = p->error_col;
+	}
+	else
+	{
+		result.error = Mud_Error_out_of_nodes;
 	}
 
 	result.node_count = p->out_nodes_used;
 	MUD_STRING_BYTES_ASSIGN(result.error_message, p->message_buffer);
 	MUD_STRING_COUNT_ASSIGN(result.error_message, p->message_length);
 	return result;
+}
+
+Mud_Node *mud_nil(void)
+{
+	static Mud_Node _mud_nil = {
+		&_mud_nil,
+		&_mud_nil,
+		&_mud_nil,
+		&_mud_nil,
+	};
+	return &_mud_nil;
+}
+
+Mud_Bool mud_is_nil(Mud_Node *node)
+{
+	return node == NULL || node == mud_nil();
+}
+
+Mud_Node *mud_get_tag(Mud_Node *node, MUD_STRING name)
+{
+	for (Mud_EachTag(tag, node))
+	{
+		if (mud_string_match(tag->name, name))
+		{
+			return tag;
+		}
+	}
+	return mud_nil();
+}
+
+Mud_Bool mud_tag_is_true(Mud_Node *node, MUD_STRING name)
+{
+	return !!(mud_get_tag(node, name)->flags & Mud_Node_Flag_is_true);
+}
+
+Mud_Node *mud_get_child(Mud_Node *node, MUD_STRING name)
+{
+	for (Mud_EachChild(child, node))
+	{
+		if (mud_string_match(child->name, name))
+		{
+			return child;
+		}
+	}
+	return mud_nil();
+}
+
+Mud_Bool mud_child_is_true(Mud_Node *node, MUD_STRING name)
+{
+	return !!(mud_get_child(node, name)->flags & Mud_Node_Flag_is_true);
 }
 
 #endif

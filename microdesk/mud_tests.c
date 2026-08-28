@@ -34,7 +34,7 @@ int entry_point(void)
 	Mud_Parse_Result result = mud_parse_from_string(&parser, mud_nodes, ArrayCount(mud_nodes), api_mud);
 	if (result.error != Mud_Error_none)
 	{
-		fprintf(stderr, "Mud Error: %.*s\n", Sx(result.error_message));
+		fprintf(stderr, "Mud Error: (%zd:%zd) %.*s\n", result.error_line, result.error_col, Sx(result.error_message));
 	}
 
 	String_Builder sb;
@@ -50,7 +50,7 @@ int entry_point(void)
 
 void mud_print(String_Builder *builder, Mud_Node *node, bool one_liner)
 {
-	for (Mud_Node *tag = node->first_tag; tag; tag = tag->next)
+	for (Mud_EachTag(tag, node))
 	{
 		sb_appendf(builder, "@");
 		mud_print(builder, tag, true);
@@ -75,17 +75,23 @@ void mud_print(String_Builder *builder, Mud_Node *node, bool one_liner)
 		}
 	}
 
-	if (node->flags & (Mud_Node_Flag_is_array|Mud_Node_Flag_is_object))
+	if (node->flags & Mud_Node_Flag_has_children)
 	{
 		char *open  = (node->flags & Mud_Node_Flag_is_array) ? "[ " : "{ ";
 		char *close = (node->flags & Mud_Node_Flag_is_array) ? "]" : "}";
+
+		if (node->flags & Mud_Node_Flag_is_tag)
+		{
+			open  = "(";
+			close = ")";
+		}
 
 		sb_appendf(builder, "%s", open);
 
 		bool multiline = !one_liner && node->first_child;
 
 		if (multiline) sb_newline(builder);
-		for (Mud_Node *child = node->first_child; child; child = child->next)
+		for (Mud_EachChild(child, node))
 		{
 			if (count++ > 0)
 			{
@@ -129,8 +135,8 @@ void mud_print(String_Builder *builder, Mud_Node *node, bool one_liner)
 			if (count > 0) sb_appends(builder, S("\n"));
 			sb_append_line_indent(builder);
 		}
-		if (one_liner && count > 0) sb_appendc(builder, ' ');
 		sb_appendf(builder, "%s", close);
+		if (one_liner && count > 0) sb_appendc(builder, ' ');
 	}
 	else
 	{
