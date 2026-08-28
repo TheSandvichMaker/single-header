@@ -632,6 +632,8 @@ typedef struct String_Builder
 	i32 indent_space_count; // if zero, indent with tabs (which you should, you animal)
 	bool use_crlf;          // why would you, though?
 
+	bool deactivate;
+
 	String_Builder_Chunk *first_chunk;
 	String_Builder_Chunk *last_chunk;
 	String_Builder_Chunk *first_free_chunk;
@@ -644,9 +646,19 @@ enum
 	String_Reindent_trim_blank_lines                  = (1u << 1),
 };
 
+typedef u32 String_Builder_Append_Flags;
+enum
+{
+	String_Builder_Append_Flag_to_lower = (1u << 0),
+	String_Builder_Append_Flag_to_upper = (1u << 1),
+};
+
 fn void sb_init(String_Builder *sb, Arena *arena);
 fn isz sb_appendc(String_Builder *sb, char c);
+fn isz sb_appends_ex(String_Builder *sb, String str, String_Builder_Append_Flags flags);
 fn isz sb_appends(String_Builder *sb, String str);
+fn isz sb_appends_lower(String_Builder *sb, String str);
+fn isz sb_appends_upper(String_Builder *sb, String str);
 fn isz sb_appendf(String_Builder *sb, char const *fmt, ...);
 fn isz sb_appendf_va(String_Builder *sb, char const *fmt, va_list args);
 fn isz sb_appendc_n(String_Builder *sb, char c, isz n);
@@ -674,6 +686,64 @@ fn isz sb_append_bin_f32(String_Builder *sb, f32 v);
 fn isz sb_append_bin_f64(String_Builder *sb, f64 v);
 // testing
 fn bool sb_verify(String_Builder *sb);
+
+//
+// String Table Writer
+//
+
+typedef enum String_Table_Align_Mode
+{
+	String_Table_Align_Mode_left,
+	String_Table_Align_Mode_right,
+	String_Table_Align_Mode_COUNT,
+} String_Table_Align_Mode;
+
+typedef struct String_Table_Column_Setup
+{
+	String                  label;
+	String                  prefix;
+	String                  suffix;
+	String_Table_Align_Mode align;
+	isz                     max_width;
+} String_Table_Column_Setup;
+
+typedef struct String_Table_Row
+{
+	struct String_Table_Row *next;
+	isz     column_count;
+	String *column_values;
+	String  custom_value;
+} String_Table_Row;
+
+typedef struct String_Table_Writer
+{
+	Arena *arena;
+
+	isz                        column_count;
+	String_Table_Column_Setup *columns;
+
+	String row_prefix;
+	String row_suffix;
+	String row_separator;
+
+	String_Table_Row *first_row;
+	String_Table_Row *last_row;
+	String_Table_Row *first_free_row;
+} String_Table_Writer;
+
+fn void string_table_writer_init      (String_Table_Writer *writer, Arena *arena, isz column_count);
+fn void string_table_set_column_prefix(String_Table_Writer *writer, isz column_index, String string);
+fn void string_table_set_column_suffix(String_Table_Writer *writer, isz column_index, String string);
+fn void string_table_set_row_prefix   (String_Table_Writer *writer, String string);
+fn void string_table_set_row_suffix   (String_Table_Writer *writer, String string);
+fn void string_table_set_up_column    (String_Table_Writer *table, isz column_index, String label, String_Table_Align_Mode align);
+fn void string_table_custom_row       (String_Table_Writer *table, String contents);
+fn void string_table_next_row         (String_Table_Writer *table);
+fn void string_table_column           (String_Table_Writer *table, String value);
+fn void string_table_columnf          (String_Table_Writer *table, const char *fmt, ...);
+fn void string_table_columnf_va       (String_Table_Writer *table, const char *fmt, va_list args);
+fn bool string_table_write            (String_Table_Writer *table, String_Builder *builder);
+fn void string_table_reset            (String_Table_Writer *table);
 
 //
 // Hashing
@@ -2852,6 +2922,8 @@ void sb_init(String_Builder *sb, Arena *arena)
 
 isz sb_appendc(String_Builder *sb, char c)
 {
+	if (sb->deactivate) return 0;
+
 	String_Builder_Chunk *chunk = sb_guarantee_chunk(sb, 1);
 	chunk->bytes[chunk->count] = c;
 	chunk->count    += 1;
@@ -2859,8 +2931,10 @@ isz sb_appendc(String_Builder *sb, char c)
 	return 1;
 }
 
-isz sb_appends(String_Builder *sb, String s)
+isz sb_appends_ex(String_Builder *sb, String s, String_Builder_Append_Flags flags)
 {
+	if (sb->deactivate) return 0;
+
 	char *at      = s.chars;
 	isz   to_copy = s.count;
 	while (to_copy > 0)
@@ -2868,13 +2942,41 @@ isz sb_appends(String_Builder *sb, String s)
 		String_Builder_Chunk *chunk = sb_guarantee_chunk(sb, to_copy);
 		isz space  = chunk->capacity - chunk->count;
 		isz copied = MIN(to_copy, space);
-		copy_bytes(&chunk->bytes[chunk->count], at, copied);
+		if (flags == 0)
+		{
+			copy_bytes(&chunk->bytes[chunk->count], at, copied);
+		}
+		else
+		{
+			for (isz i = 0; i < copied; i += 1)
+			{
+				char c = at[i];
+				if (flags & String_Builder_Append_Flag_to_lower) c = char_to_lower(c);
+				if (flags & String_Builder_Append_Flag_to_upper) c = char_to_upper(c);
+				chunk->bytes[chunk->count + i] = c;
+			}
+		}
 		chunk->count += copied;
 		at           += copied;
 		to_copy      -= copied;
 	}
 	sb->total_count += s.count;
 	return s.count;
+}
+
+isz sb_appends(String_Builder *sb, String s)
+{
+	return sb_appends_ex(sb, s, 0);
+}
+
+isz sb_appends_lower(String_Builder *sb, String s)
+{
+	return sb_appends_ex(sb, s, String_Builder_Append_Flag_to_lower);
+}
+
+isz sb_appends_upper(String_Builder *sb, String s)
+{
+	return sb_appends_ex(sb, s, String_Builder_Append_Flag_to_upper);
 }
 
 fn_local char *sb_sprintf_cb(const char *buf, void *user, int len)
@@ -3093,6 +3195,193 @@ bool sb_verify(String_Builder *sb)
 		total_count += chunk->count;
 	}
 	return sb->total_count == total_count;
+}
+
+//
+// String Table Writer
+//
+
+void string_table_writer_init(String_Table_Writer *writer, Arena *arena, isz column_count)
+{
+	writer->arena          = arena;
+	writer->column_count   = column_count;
+	writer->columns        = arena_alloc_array(arena, column_count, String_Table_Column_Setup);
+	writer->row_prefix     = S("");
+	writer->row_suffix     = S("");
+	writer->row_separator  = S(" ");
+	writer->first_row      = NULL;
+	writer->last_row       = NULL;
+	writer->first_free_row = NULL;
+}
+
+void string_table_set_row_prefix(String_Table_Writer *writer, String string)
+{
+	writer->row_prefix = string;
+}
+
+void string_table_set_row_suffix(String_Table_Writer *writer, String string)
+{
+	writer->row_suffix = string;
+}
+
+void string_table_set_column_prefix(String_Table_Writer *writer, isz column_index, String string)
+{
+	if (dc_always(column_index >= 0 && column_index < writer->column_count))
+	{
+		writer->columns[column_index].prefix = string;
+	}
+}
+
+void string_table_set_column_suffix(String_Table_Writer *writer, isz column_index, String string)
+{
+	if (dc_always(column_index >= 0 && column_index < writer->column_count))
+	{
+		writer->columns[column_index].suffix = string;
+	}
+}
+
+void string_table_set_up_column(String_Table_Writer *table, isz column_index, String label, String_Table_Align_Mode align)
+{
+	dc_assert(column_index >= 0 && column_index < table->column_count);
+
+	String_Table_Column_Setup *setup = &table->columns[column_index];
+	setup->label = label;
+	setup->align = align;
+}
+
+void string_table_custom_row(String_Table_Writer *table, String contents)
+{
+	if (table->first_free_row == NULL)
+	{
+		table->first_free_row = arena_alloc_struct_nozero(table->arena, String_Table_Row);
+		table->first_free_row->next = NULL;
+	}
+	String_Table_Row *row = sll_pop(table->first_free_row);
+	zero_struct(row);
+	row->custom_value = string_copy(table->arena, contents);
+	sll_push_back(table->first_row, table->last_row, row);
+}
+
+void string_table_next_row(String_Table_Writer *table)
+{
+	if (table->first_free_row == NULL)
+	{
+		table->first_free_row = arena_alloc_struct_nozero(table->arena, String_Table_Row);
+		table->first_free_row->next = NULL;
+	}
+	String_Table_Row *row = sll_pop(table->first_free_row);
+	zero_struct(row);
+	row->column_values = arena_alloc_array(table->arena, table->column_count, String);
+	sll_push_back(table->first_row, table->last_row, row);
+}
+
+void string_table_column(String_Table_Writer *table, String value)
+{
+	String_Table_Row *row = table->last_row;
+
+	dc_assert(row->column_count < table->column_count);
+
+	isz column_index = row->column_count++;
+	row->column_values[column_index] = string_copy(table->arena, value);
+
+	String_Table_Column_Setup *column = &table->columns[column_index];
+
+	isz total_width = value.count + column->prefix.count + column->suffix.count;
+	column->max_width = MAX(column->max_width, total_width);
+}
+
+void string_table_columnf(String_Table_Writer *table, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+
+	string_table_columnf_va(table, fmt, args);
+
+	va_end(args);
+}
+
+void string_table_columnf_va(String_Table_Writer *table, const char *fmt, va_list args)
+{
+	String_Table_Row *row = table->last_row;
+
+	dc_assert(row->column_count < table->column_count);
+
+	String value = string_format_va(table->arena, fmt, args);
+
+	isz column_index = row->column_count++;
+	row->column_values[column_index] = value;
+
+	String_Table_Column_Setup *column = &table->columns[column_index];
+	column->max_width = MAX(column->max_width, value.count);
+}
+
+bool string_table_write(String_Table_Writer *table, String_Builder *builder)
+{
+	bool result = false;
+
+	for (String_Table_Row *row = table->first_row; row; row = row->next)
+	{
+		if (!string_empty(row->custom_value))
+		{
+			// hmm... yes or no? or make it customizable
+			sb_appends(builder, row->custom_value);
+			sb_newline(builder);
+		}
+		else
+		{
+			sb_append_line_indent(builder);
+			sb_appends(builder, table->row_prefix);
+
+			for (isz column_index = 0; column_index < row->column_count; column_index += 1)
+			{
+				result = true;
+
+				String_Table_Column_Setup *column = &table->columns[column_index];
+				String                     value  = row->column_values[column_index];
+
+				isz max_width = column->max_width;
+				isz padding   = max_width - value.count;
+				dc_assert(padding >= 0);
+
+				if (column->align == String_Table_Align_Mode_right)
+				{
+					sb_append_spaces(builder, padding);
+				}
+
+				sb_appends(builder, column->prefix);
+				sb_appends(builder, value);
+				sb_appends(builder, column->suffix);
+
+				if (column_index + 1 < row->column_count)
+				{
+					sb_appends(builder, table->row_separator);
+
+					if (column->align == String_Table_Align_Mode_left)
+					{
+						sb_append_spaces(builder, padding);
+					}
+				}
+			}
+
+			sb_appends(builder, table->row_suffix);
+			sb_newline(builder);
+		}
+	}
+
+	string_table_reset(table);
+	return result;
+}
+
+void string_table_reset(String_Table_Writer *table)
+{
+	table->first_free_row = table->first_row;
+	table->first_row = table->last_row = NULL;
+
+	for (isz i = 0; i < table->column_count; i += 1)
+	{
+		String_Table_Column_Setup *column = &table->columns[i];
+		column->max_width = 0;
+	}
 }
 
 //
