@@ -137,6 +137,7 @@ fn_local u8 *align_pointer(void *ptr, isz align)
 
 #define dc_sizeof(type) ((isz)sizeof(type))
 #define dc_alignof(type) alignof(type)
+#define dc_offsetof(type, member) offsetof(type, member)
 
 #define DC_DEFER_LOOP(begin, end) for (i32 PASTE(_i_, __LINE__) = (begin, 0); !PASTE(_i_, __LINE__); PASTE(_i_, __LINE__) += (end, 1))
 
@@ -146,7 +147,7 @@ fn_local u8 *align_pointer(void *ptr, isz align)
 
 typedef struct String
 {
-	char *bytes;
+	char *chars;
 	isz   count;
 } String;
 
@@ -165,9 +166,14 @@ typedef struct String_Pair
 
 typedef struct String16
 {
-	wchar_t *bytes; // apologies for the misnomer
-	isz  count;
+	wchar_t *chars; // apologies for the misnomer
+	isz      count;
 } String16;
+
+#define String_Storage(size) struct { isz count; char chars[size]; }
+#define string_from_storage(storage) (DF_STRUCT_LIT(String) { (storage).chars, (storage.count) })
+#define string_into_storage(storage, string) (copy_bytes((storage).chars, (string).chars, MIN((isz)ArrayCount((storage).chars), (string).count)), (storage).count = (string).count)
+#define string_storage_size(storage) ((isz)ArrayCount((storage).chars))
 
 //
 // Assert
@@ -193,7 +199,7 @@ typedef struct Memory
 fn_local Memory memory_from_string(String str)
 {
 	Memory result;
-	result.bytes = str.bytes;
+	result.bytes = str.chars;
 	result.size  = str.count;
 	return result;
 }
@@ -201,7 +207,7 @@ fn_local Memory memory_from_string(String str)
 fn_local String string_from_memory(Memory mem)
 {
 	String result;
-	result.bytes = (char *)mem.bytes;
+	result.chars = (char *)mem.bytes;
 	result.count = mem.size;
 	return result;
 }
@@ -301,6 +307,7 @@ typedef struct Arena
 	Arena_Scope *current_scope;
 
 #if DC_ARENA_DEBUG
+	String_Storage(64) name;
 	Arena_Debug_State debug;
 #endif
 } Arena;
@@ -326,8 +333,8 @@ fn void *arena_alloc_ex_(Arena *arena, isz size, isz align, bool zero_memory, bo
 #define arena_copy(arena, src, size) copy_bytes(arena_alloc_nozero(arena, size, 16), src, size)
 
 fn void arena_init(Arena *arena, String name, Arena_Desc const *desc);
-fn Arena *arena_make(String name, Arena_Desc const *desc);
-fn Arena *arena_make_default(String name);
+fn Arena *arena_make_ex(String name, Arena_Desc const *desc);
+fn Arena *arena_make(String name);
 fn Arena *arena_make_child(Arena *parent, String name, Arena_Desc const *desc);
 fn void arena_add_child(Arena *parent, Arena *child);
 fn void arena_destroy(Arena *arena); // destroys all children
@@ -378,14 +385,9 @@ fn void arena_reset_temp_arenas(void);
 #define Sc(text)                         { (char *)("" text), dc_sizeof(text) - 1 }
 #define S(text)  DC_COMPOUND_LIT(String) { (char *)("" text), dc_sizeof(text) - 1 }
 // Usage: printf("%.*s", Sx(string));
-#define Sx(str) (int)(str).count, (str).bytes
+#define Sx(str) (int)(str).count, (str).chars
 
 #define S16(text) DC_COMPOUND_LIT(String16) { (u16 *)(L"" text), sizeof(L"" text) / sizeof(u16) - 1 }
-
-#define String_Storage(size) struct { isz count; char bytes[size]; }
-#define string_from_storage(storage) (DF_STRUCT_LIT(String) { (storage).bytes, (storage.count) })
-#define string_into_storage(storage, string) (copy_bytes((storage).bytes, (string).bytes, MIN((isz)ArrayCount((storage).bytes), (string).count)), (storage).count = (string).count)
-#define string_storage_size(storage) ((isz)ArrayCount((storage).bytes))
 
 // Single Character
 fn bool char_is_whitespace(char c);
@@ -451,6 +453,7 @@ enum
 fn isz string_compare(String a, String b, String_Match_Flags flags);
 fn bool string_match_ex(String a, String b, String_Match_Flags flags);
 fn bool string_match(String a, String b);
+fn bool string16_match(String16 a, String16 b);
 fn bool string_match_insensitive(String a, String b);
 fn bool string_match_prefix(String string, String prefix, String_Match_Flags flags);
 fn bool string_match_suffix(String string, String suffix, String_Match_Flags flags);
@@ -679,6 +682,128 @@ fn bool sb_verify(String_Builder *sb);
 fn bool os_write_entire_file(String path, Memory memory);
 fn Memory os_read_entire_file(Arena *arena, String path);
 
+//
+// Debugging
+//
+
+#if defined(_WIN32)
+#define debug_break() __debugbreak()
+#else
+#error TODO: Other platforms
+#endif
+
+fn bool os_is_debugger_attached(void);
+
+//
+// Logging
+//
+
+typedef enum Log_Level
+{
+	Log_Level_debug,
+	Log_Level_info,
+	Log_Level_warning,
+	Log_Level_error,
+	Log_Level_fatal,
+	Log_Level_COUNT,
+} Log_Level;
+
+fn void set_log_level_enabled(Log_Level level, bool enabled);
+fn String log_level_to_string(Log_Level level);
+
+fn void logf   (Log_Level level, String file, isz line, char const *fmt, ...);
+fn void logf_va(Log_Level level, String file, isz line, char const *fmt, va_list args);
+
+#define LOG(level, fmt, ...) logf(Log_Level_##level, S(__FILE__), __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) LOG(debug, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...) LOG(info, fmt, ##__VA_ARGS__)
+#define LOG_WARNING(fmt, ...) LOG(warning, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) LOG(error, fmt, ##__VA_ARGS__)
+#define LOG_FATAL(fmt, ...) LOG(fatal, fmt, ##__VA_ARGS__)
+
+//
+// Testing
+//
+
+typedef struct Test_Context
+{
+	isz   ran_count;
+	isz   failed_count;
+	void *user_data;
+} Test_Context;
+
+typedef void (*Test_Suite)(Test_Context *t);
+
+fn void test_run(Test_Context *t, String name, Test_Suite suite);
+#define TEST_RUN(t, suite) test_run(t, S(#suite), suite);
+fn void test_expect   (Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...);
+fn void test_expect_va(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, va_list args);
+#define TEST_EXPECT(t, cond, ...) test_expect(t, cond, S(__FILE__), __LINE__, S(#cond), "" ##__VA_ARGS__)
+
+fn int test_report(Test_Context *t);
+
+//
+// Thread-Local Storage
+//
+
+typedef struct TLS_Handle
+{
+#if defined(_WIN32)
+	u32 handle;
+#else
+	pthread_key_t handle;
+#endif
+	bool is_allocated;
+} TLS_Handle;
+
+fn TLS_Handle tls_allocate(void);
+fn bool       tls_free    (TLS_Handle handle);
+fn bool       tls_is_valid(TLS_Handle handle);
+fn void      *tls_get     (TLS_Handle handle);
+fn void       tls_set     (TLS_Handle handle, void *value);
+
+//
+// Global context (used to allow global library state to survive hot reloading)
+//
+
+typedef struct Thread_Context
+{
+	Arena *temp_arenas[2];
+	isz    temp_arena_index;
+} Thread_Context;
+
+typedef struct DC_Config
+{
+	int placeholder;
+} DC_Config;
+
+typedef struct DC_Context
+{
+	Arena *arena;
+
+	int    argc;
+	char **argv;
+
+	TLS_Handle tctx;
+
+	bool log_level_enabled[Log_Level_COUNT];
+} DC_Context;
+
+global DC_Context *_G;
+
+fn void dc_init(int argc, char **argv, DC_Config const *config);
+fn DC_Context *dc_get_context(void);
+fn void dc_set_context(DC_Context *context);
+fn Thread_Context *get_tctx(void);
+
+//
+// Entry Point
+//
+
+#ifndef DC_NO_ENTRY_POINT
+fn int entry_point(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
@@ -815,7 +940,7 @@ void *arena_alloc_ex_(Arena *arena, isz size, isz align, bool zero_memory, bool 
 	return result;
 }
 
-Arena *arena_make(String name, Arena_Desc const *desc)
+Arena *arena_make_ex(String name, Arena_Desc const *desc)
 {
 	(void)name;
 
@@ -829,21 +954,24 @@ Arena *arena_make(String name, Arena_Desc const *desc)
 	arena->end              = (u8 *)arena + desc->capacity;
 	arena->committed        = (u8 *)arena + DC_ARENA_DEFAULT_MIN_COMMIT_CHARGE;
 	arena->zeroed_watermark = arena->buffer;
+#if DC_ARENA_DEBUG
+	string_into_storage(arena->name, name);
+#endif
 
 	return arena;
 }
 
-Arena *arena_make_default(String name)
+Arena *arena_make(String name)
 {
 	Arena_Desc desc;
 	desc.capacity = DC_ARENA_DEFAULT_CAPACITY;
 
-	return arena_make(name, &desc);
+	return arena_make_ex(name, &desc);
 }
 
 Arena *arena_make_child(Arena *parent, String name, Arena_Desc const *desc)
 {
-	Arena *child = arena_make(name, desc);
+	Arena *child = arena_make_ex(name, desc);
 	arena_add_child(parent, child);
 
 	return child;
@@ -874,7 +1002,7 @@ Arena *arena_bootstrap_(String name, isz size, isz align, isz offset_to_member, 
 {
 	(void)typecheck;
 
-	Arena *arena = arena_make_default(name);
+	Arena *arena = arena_make(name);
 	void *result = arena_alloc(arena, size, align);
 
 	// Copying the arena pointer, not the arena
@@ -1018,27 +1146,21 @@ void arena_scope_abandon(Arena *arena)
 	}
 }
 
-typedef struct Thread_Context
-{
-	Arena *temp_arenas[2];
-	isz    temp_arena_index;
-} Thread_Context;
-
-dc_thread_local Thread_Context tctx;
-
 Arena *arena_get_temp(void)
 {
-	Arena *arena = tctx.temp_arenas[tctx.temp_arena_index];
-	tctx.temp_arena_index = 1 - tctx.temp_arena_index;
+	Thread_Context *tctx = get_tctx();
+
+	Arena *arena = tctx->temp_arenas[tctx->temp_arena_index];
+	tctx->temp_arena_index = 1 - tctx->temp_arena_index;
 
 	if (arena == NULL)
 	{
 		// TODO: thread id
 		char buf[64];
-		String name = string_format_into_buffer(buf, sizeof(buf), "tctx(-1).temp[%zd]", 1 - tctx.temp_arena_index);
+		String name = string_format_into_buffer(buf, sizeof(buf), "tctx(-1).temp[%zd]", 1 - tctx->temp_arena_index);
 
-		arena = arena_make_default(name);
-		tctx.temp_arenas[1 - tctx.temp_arena_index] = arena;
+		arena = arena_make(name);
+		tctx->temp_arenas[1 - tctx->temp_arena_index] = arena;
 	}
 
 	arena_scope_begin(arena);
@@ -1049,19 +1171,23 @@ void arena_release_temp(Arena *temp)
 {
 	dc_assert(temp == arena_get_temp_unscoped());
 
+	Thread_Context *tctx = get_tctx();
+
 	arena_scope_end(temp);
-	tctx.temp_arena_index = 1 - tctx.temp_arena_index;
+	tctx->temp_arena_index = 1 - tctx->temp_arena_index;
 }
 
 Arena *arena_get_temp_unscoped(void)
 {
-	return tctx.temp_arenas[1 - tctx.temp_arena_index];
+	Thread_Context *tctx = get_tctx();
+	return tctx->temp_arenas[1 - tctx->temp_arena_index];
 }
 
 void arena_reset_temp_arenas(void)
 {
-	arena_reset(tctx.temp_arenas[0]);
-	arena_reset(tctx.temp_arenas[1]);
+	Thread_Context *tctx = get_tctx();
+	arena_reset(tctx->temp_arenas[0]);
+	arena_reset(tctx->temp_arenas[1]);
 }
 
 //
@@ -1183,7 +1309,7 @@ i64 digit_from_char_ex(char c, i64 base)
 
 bool string_empty(String str)
 {
-	return str.bytes == NULL || str.count <= 0;
+	return str.chars == NULL || str.count <= 0;
 }
 
 isz cstring_count(char const *str)
@@ -1215,7 +1341,7 @@ isz string_count_newlines(String string)
 	isz result = 0;
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		if (string.bytes[i] == '\n') result += 1;
+		if (string.chars[i] == '\n') result += 1;
 	}
 	return result;
 }
@@ -1239,24 +1365,24 @@ String substring(String str, isz first, isz count)
 {
 	first = CLAMP(first, 0, str.count);
 	count = CLAMP(count, 0, str.count - first);
-	return DC_COMPOUND_LIT(String){ str.bytes + first, count };
+	return DC_COMPOUND_LIT(String){ str.chars + first, count };
 }
 
 String substring_range(String str, isz first, isz one_past_last)
 {
 	first = CLAMP(first, 0, str.count);
 	one_past_last = CLAMP(one_past_last, first, str.count);
-	return DC_COMPOUND_LIT(String){ str.bytes + first, one_past_last - first };
+	return DC_COMPOUND_LIT(String){ str.chars + first, one_past_last - first };
 }
 
 String string_null_terminate(Arena *arena, String str)
 {
 	String result;
-	result.bytes = arena_alloc_array_nozero(arena, str.count + 1, char);
+	result.chars = arena_alloc_array_nozero(arena, str.count + 1, char);
 	result.count = str.count;
 
-	copy_array(result.bytes, str.bytes, result.count);
-	result.bytes[result.count] = '\0';
+	copy_array(result.chars, str.chars, result.count);
+	result.chars[result.count] = '\0';
 
 	return result;
 }
@@ -1264,11 +1390,11 @@ String string_null_terminate(Arena *arena, String str)
 String16 string16_null_terminate(Arena *arena, String16 str)
 {
 	String16 result;
-	result.bytes = arena_alloc_array_nozero(arena, str.count + 1, u16);
+	result.chars = arena_alloc_array_nozero(arena, str.count + 1, u16);
 	result.count = str.count;
 
-	copy_array(result.bytes, str.bytes, result.count);
-	result.bytes[result.count] = '\0';
+	copy_array(result.chars, str.chars, result.count);
+	result.chars[result.count] = '\0';
 
 	return result;
 }
@@ -1276,7 +1402,7 @@ String16 string16_null_terminate(Arena *arena, String16 str)
 String string_null_terminate_into_buffer(char *buffer, isz buffer_size, String str)
 {
 	isz copy_size = MIN(buffer_size - 1, str.count);
-	copy_array(buffer, str.bytes, copy_size);
+	copy_array(buffer, str.chars, copy_size);
 	buffer[copy_size] = '\0';
 	return DC_COMPOUND_LIT(String){ buffer, copy_size };
 }
@@ -1329,7 +1455,7 @@ rune utf8_decode(char const **cursor, isz *remaining)
 		if (i >= available || ((c = s[i]) & 0xC0u) != 0x80u)
 		{
 			// The sequence is cut short, either by the end of the source or by a byte that is not
-			// a continuation. Consume only the bytes that were actually part of it - never the byte
+			// a continuation. Consume only the chars that were actually part of it - never the byte
 			// that ended it, it may be the start of a valid sequence, or the terminator.
 			*cursor += i;
 			*remaining -= (size_t)i;
@@ -1510,23 +1636,23 @@ isz utf8_from_utf16_into_buffer(char *dst, isz dst_capacity, u16 const *src, isz
 
 String16 utf16_from_utf8(Arena *arena, String utf8)
 {
-	isz required = utf16_from_utf8_into_buffer(NULL, 0, utf8.bytes, utf8.count);
+	isz required = utf16_from_utf8_into_buffer(NULL, 0, utf8.chars, utf8.count);
 
 	String16 result;
-	result.bytes = arena_alloc_array_nozero(arena, required, u16);
+	result.chars = arena_alloc_array_nozero(arena, required, u16);
 	result.count = required - 1;
 
-	utf16_from_utf8_into_buffer(result.bytes, result.count, utf8.bytes, utf8.count);
+	utf16_from_utf8_into_buffer(result.chars, required, utf8.chars, utf8.count);
 
 	return result;
 }
 
 String utf8_from_utf16(Arena *arena, String16 utf16)
 {
-	isz required = utf8_from_utf16_into_buffer(NULL, 0, utf16.bytes, utf16.count);
+	isz required = utf8_from_utf16_into_buffer(NULL, 0, utf16.chars, utf16.count);
 
 	String result = string_allocate_with_null_terminator(arena, required - 1);
-	utf8_from_utf16_into_buffer(result.bytes, required, utf16.bytes, utf16.count);
+	utf8_from_utf16_into_buffer(result.chars, required, utf16.chars, utf16.count);
 
 	return result;
 }
@@ -1536,7 +1662,7 @@ String string_allocate(Arena *arena, isz len)
 	len = MAX(0, len);
 
 	String result;
-	result.bytes = arena_alloc_array_nozero(arena, len, char);
+	result.chars = arena_alloc_array_nozero(arena, len, char);
 	result.count = len;
 	return result;
 }
@@ -1546,7 +1672,7 @@ String string_allocate_with_null_terminator(Arena *arena, isz len)
 	len = MAX(0, len);
 
 	String result;
-	result.bytes = arena_alloc_array_nozero(arena, len + 1, char);
+	result.chars = arena_alloc_array_nozero(arena, len + 1, char);
 	result.count = len;
 	return result;
 }
@@ -1562,7 +1688,7 @@ String string_to_lower(Arena *arena, String string)
 	String result = string_allocate(arena, string.count);
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		result.bytes[i] = char_to_lower(string.bytes[i]);
+		result.chars[i] = char_to_lower(string.chars[i]);
 	}
 	return result;
 }
@@ -1572,7 +1698,7 @@ String string_to_upper(Arena *arena, String string)
 	String result = string_allocate(arena, string.count);
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		result.bytes[i] = char_to_upper(string.bytes[i]);
+		result.chars[i] = char_to_upper(string.chars[i]);
 	}
 	return result;
 }
@@ -1581,7 +1707,7 @@ void string_to_lower_in_place(String string)
 {
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		string.bytes[i] = char_to_lower(string.bytes[i]);
+		string.chars[i] = char_to_lower(string.chars[i]);
 	}
 }
 
@@ -1589,7 +1715,7 @@ void string_to_upper_in_place(String string)
 {
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		string.bytes[i] = char_to_upper(string.bytes[i]);
+		string.chars[i] = char_to_upper(string.chars[i]);
 	}
 }
 
@@ -1726,10 +1852,10 @@ String string_format_va(Arena *arena, char const *fmt, va_list args)
 	va_end(args2);
 
 	String result;
-	result.bytes = arena_alloc_array_nozero(arena, required + 1, char);
+	result.chars = arena_alloc_array_nozero(arena, required + 1, char);
 	result.count = required;
 
-	stbsp_vsnprintf(result.bytes, (int)(result.count + 1), fmt, args);
+	stbsp_vsnprintf(result.chars, (int)(result.count + 1), fmt, args);
 
 	return result;
 }
@@ -1751,7 +1877,7 @@ String string_format_into_buffer_va(char *buffer, isz buffer_size, char const *f
 	int count = stbsp_vsnprintf(buffer, (int)buffer_size, fmt, args);
 
 	String result;
-	result.bytes = buffer;
+	result.chars = buffer;
 	result.count = count;
 
 	return result;
@@ -1782,15 +1908,15 @@ String string_escapify(Arena *arena, String string)
 	isz at = 0;
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		switch (string.bytes[i])
+		switch (string.chars[i])
 		{
-			case '\n': result.bytes[at++] = '\\'; result.bytes[at++] = '\n'; break;
-			case '\r': result.bytes[at++] = '\\'; result.bytes[at++] = '\r'; break;
-			case '\t': result.bytes[at++] = '\\'; result.bytes[at++] = '\t'; break;
-			case '\v': result.bytes[at++] = '\\'; result.bytes[at++] = '\v'; break;
-			case  '"': result.bytes[at++] = '\\'; result.bytes[at++] =  '"'; break;
-			case '\\': result.bytes[at++] = '\\'; result.bytes[at++] = '\\'; break;
-			default: result.bytes[at++] = string.bytes[i];
+			case '\n': result.chars[at++] = '\\'; result.chars[at++] = '\n'; break;
+			case '\r': result.chars[at++] = '\\'; result.chars[at++] = '\r'; break;
+			case '\t': result.chars[at++] = '\\'; result.chars[at++] = '\t'; break;
+			case '\v': result.chars[at++] = '\\'; result.chars[at++] = '\v'; break;
+			case  '"': result.chars[at++] = '\\'; result.chars[at++] =  '"'; break;
+			case '\\': result.chars[at++] = '\\'; result.chars[at++] = '\\'; break;
+			default: result.chars[at++] = string.chars[i];
 		}
 	}
 	result.count = at;
@@ -1805,28 +1931,28 @@ String string_unescapify(Arena *arena, String string)
 	isz at = 0;
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		if (i + 1 < string.count && string.bytes[i] == '\\')
+		if (i + 1 < string.count && string.chars[i] == '\\')
 		{
 			i += 1;
-			switch (string.bytes[i])
+			switch (string.chars[i])
 			{
-				case  'n': result.bytes[at++] = '\n'; break;
-				case  'r': result.bytes[at++] = '\r'; break;
-				case  't': result.bytes[at++] = '\t'; break;
-				case  'v': result.bytes[at++] = '\v'; break;
-				case  '"': result.bytes[at++] =  '"'; break;
-				case '\\': result.bytes[at++] = '\\'; break;
+				case  'n': result.chars[at++] = '\n'; break;
+				case  'r': result.chars[at++] = '\r'; break;
+				case  't': result.chars[at++] = '\t'; break;
+				case  'v': result.chars[at++] = '\v'; break;
+				case  '"': result.chars[at++] =  '"'; break;
+				case '\\': result.chars[at++] = '\\'; break;
 				default:
 				{
 					// TODO(daniel): Return/report information about invalid escapes?
-					result.bytes[at++] = '\\';
-					result.bytes[at++] = string.bytes[i];
+					result.chars[at++] = '\\';
+					result.chars[at++] = string.chars[i];
 				} break;
 			}
 		}
 		else
 		{
-			result.bytes[at++] = string.bytes[i];
+			result.chars[at++] = string.chars[i];
 		}
 	}
 	result.count = at;
@@ -1839,8 +1965,8 @@ isz string_compare(String a, String b, String_Match_Flags flags)
 	isz diff = 0;
 	for (isz i = 0; i < MIN(a.count, b.count); i += 1)
 	{
-		char ch_a = a.bytes[i];
-		char ch_b = b.bytes[i];
+		char ch_a = a.chars[i];
+		char ch_b = b.chars[i];
 		if (flags & SM_insensitive)
 		{
 			ch_a = char_to_lower(ch_a);
@@ -1858,8 +1984,8 @@ bool string_match_ex(String a, String b, String_Match_Flags flags)
 	if (a.count != b.count) return false;
 	for (isz i = 0; i < a.count; i += 1)
 	{
-		char ch_a = a.bytes[i];
-		char ch_b = b.bytes[i];
+		char ch_a = a.chars[i];
+		char ch_b = b.chars[i];
 		if (flags & SM_insensitive)
 		{
 			ch_a = char_to_lower(ch_a);
@@ -1876,15 +2002,25 @@ bool string_match(String a, String b)
 	if (a.count != b.count) return false;
 	isz oct_count = (a.count >> 3);
 	isz single_count = a.count - (oct_count << 3);
-	u64 *oct_a = (u64 *)a.bytes;
-	u64 *oct_b = (u64 *)b.bytes;
+	u64 *oct_a = (u64 *)a.chars;
+	u64 *oct_b = (u64 *)b.chars;
 	for (isz i = 0; i < oct_count; i += 1)
 	{
 		if (oct_a[i] != oct_b[i]) return false;
 	}
 	for (isz i = (oct_count << 3); i < (oct_count << 3) + single_count; i += 1)
 	{
-		if (a.bytes[i] != b.bytes[i]) return false;
+		if (a.chars[i] != b.chars[i]) return false;
+	}
+	return true;
+}
+
+bool string16_match(String16 a, String16 b)
+{
+	if (a.count != b.count) return false;
+	for (isz i = 0; i < a.count; i += 1)
+	{
+		if (a.chars[i] != b.chars[i]) return false;
 	}
 	return true;
 }
@@ -1914,28 +2050,28 @@ isz string_find_first_char(String string, char c, String_Match_Flags flags)
 		c = char_to_lower(c);
 		for (; i < (string.count & ~3); i += 4)
 		{
-			if (char_to_lower(string.bytes[i + 0]) == c) return i + 0;
-			if (char_to_lower(string.bytes[i + 1]) == c) return i + 1;
-			if (char_to_lower(string.bytes[i + 2]) == c) return i + 2;
-			if (char_to_lower(string.bytes[i + 3]) == c) return i + 3;
+			if (char_to_lower(string.chars[i + 0]) == c) return i + 0;
+			if (char_to_lower(string.chars[i + 1]) == c) return i + 1;
+			if (char_to_lower(string.chars[i + 2]) == c) return i + 2;
+			if (char_to_lower(string.chars[i + 3]) == c) return i + 3;
 		}
 		for (; i < string.count; i += 1)
 		{
-			if (char_to_lower(string.bytes[i]) == c) return i;
+			if (char_to_lower(string.chars[i]) == c) return i;
 		}
 	}
 	else
 	{
 		for (; i < (string.count & ~3); i += 4)
 		{
-			if (string.bytes[i + 0] == c) return i + 0;
-			if (string.bytes[i + 1] == c) return i + 1;
-			if (string.bytes[i + 2] == c) return i + 2;
-			if (string.bytes[i + 3] == c) return i + 3;
+			if (string.chars[i + 0] == c) return i + 0;
+			if (string.chars[i + 1] == c) return i + 1;
+			if (string.chars[i + 2] == c) return i + 2;
+			if (string.chars[i + 3] == c) return i + 3;
 		}
 		for (; i < string.count; i += 1)
 		{
-			if (string.bytes[i] == c) return i;
+			if (string.chars[i] == c) return i;
 		}
 	}
 	return string.count;
@@ -1945,7 +2081,7 @@ isz string_find_first_non_whitespace(String string)
 {
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		if (!char_is_whitespace(string.bytes[i]))
+		if (!char_is_whitespace(string.chars[i]))
 		{
 			return i;
 		}
@@ -1960,14 +2096,14 @@ isz string_find_last_char(String string, char c, String_Match_Flags flags)
 		c = char_to_lower(c);
 		for (isz i = string.count - 1; i >= 0; i -= 1)
 		{
-			if (char_to_lower(string.bytes[i]) == c) return i;
+			if (char_to_lower(string.chars[i]) == c) return i;
 		}
 	}
 	else
 	{
 		for (isz i = string.count - 1; i >= 0; i -= 1)
 		{
-			if (string.bytes[i] == c) return i;
+			if (string.chars[i] == c) return i;
 		}
 	}
 	return string.count;
@@ -1985,7 +2121,7 @@ isz string_find_substring(String text, String pattern, String_Match_Flags flags)
 		{
 			return i;
 		}
-		window.bytes += 1;
+		window.chars += 1;
 	}
 	return text.count;
 }
@@ -2002,7 +2138,7 @@ isz string_find_substring_backwards(String text, String pattern, String_Match_Fl
 		{
 			return i;
 		}
-		window.bytes -= 1;
+		window.chars -= 1;
 	}
 	return text.count;
 }
@@ -2014,18 +2150,18 @@ fn String string_find_enclosed_group(String string, char open, char close, bool 
 	isz i = string_find_first_char(string, open, 0);
 	if (i >= string.count - 1) return result;
 
-	char *start = &string.bytes[i];
+	char *start = &string.chars[i];
 
     i += 1;
 
 	isz depth = 1;
 	while (i < string.count && depth > 0)
 	{
-		if (string.bytes[i] == open)
+		if (string.chars[i] == open)
 		{
-			if (recurse) depth += 1; else start = &string.bytes[i];
+			if (recurse) depth += 1; else start = &string.chars[i];
 		}
-		else if (string.bytes[i] == close)
+		else if (string.chars[i] == close)
 		{
 			depth -= 1;
 		}
@@ -2033,11 +2169,11 @@ fn String string_find_enclosed_group(String string, char open, char close, bool 
 		if (depth == 0) break;
 	}
 
-	char *end  = &string.bytes[i];
+	char *end  = &string.chars[i];
 
 	if (depth == 0)
 	{
-		result.bytes = start;
+		result.chars = start;
 		result.count = end - start;
 	}
 
@@ -2063,13 +2199,13 @@ isz string_calculate_levenshtein_distance(String s, String t, String_Match_Flags
 
 		for (i32 i = 1; i <= n; i += 1)
 		{
-			char si = s.bytes[i - 1];
+			char si = s.chars[i - 1];
 
 			if (flags & SM_insensitive) si = char_to_lower(si);
 
 			for (i32 j = 1; j <= m; j += 1)
 			{
-				char tj = t.bytes[j - 1];
+				char tj = t.chars[j - 1];
 
 				if (flags & SM_insensitive) tj = char_to_lower(tj);
 
@@ -2096,14 +2232,14 @@ void path_normalize_in_place(String *path)
 	bool last_was_path_separator = false;
 	for (isz i = 0; i < path->count; i += 1)
 	{
-		if (char_is_path_separator(path->bytes[i]))
+		if (char_is_path_separator(path->chars[i]))
 		{
-			if (!last_was_path_separator) path->bytes[at++] = OS_PATH_SEPARATOR;
+			if (!last_was_path_separator) path->chars[at++] = OS_PATH_SEPARATOR;
 			last_was_path_separator = true;
 		}
 		else
 		{
-			path->bytes[at++] = path->bytes[i];
+			path->chars[at++] = path->chars[i];
 			last_was_path_separator = false;
 		}
 	}
@@ -2118,14 +2254,14 @@ String path_normalize(Arena *arena, String path)
 	bool last_was_path_separator = false;
 	for (isz i = 0; i < path.count; i += 1)
 	{
-		if (char_is_path_separator(path.bytes[i]))
+		if (char_is_path_separator(path.chars[i]))
 		{
-			if (!last_was_path_separator) result.bytes[at++] = OS_PATH_SEPARATOR;
+			if (!last_was_path_separator) result.chars[at++] = OS_PATH_SEPARATOR;
 			last_was_path_separator = true;
 		}
 		else
 		{
-			result.bytes[at++] = path.bytes[i];
+			result.chars[at++] = path.chars[i];
 			last_was_path_separator = false;
 		}
 	}
@@ -2139,7 +2275,7 @@ String path_leaf(String path)
 	isz j = 0;
 	for (isz i = 0; i < path.count; i += 1)
 	{
-		if (char_is_path_separator(path.bytes[i]))
+		if (char_is_path_separator(path.chars[i]))
 		{
 			j = i + 1;
 		}
@@ -2152,7 +2288,7 @@ String path_directory(String path)
 	isz j = 0;
 	for (isz i = 0; i < path.count; i += 1)
 	{
-		if (char_is_path_separator(path.bytes[i]))
+		if (char_is_path_separator(path.chars[i]))
 		{
 			j = i;
 		}
@@ -2206,12 +2342,12 @@ bool path_match_long_extension(String path, String extension)
 
 char *string_start(String string)
 {
-	return string.bytes;
+	return string.chars;
 }
 
 char *string_end(String string)
 {
-	return &string.bytes[string.count];
+	return &string.chars[string.count];
 }
 
 char string_peek(String string, isz index)
@@ -2219,7 +2355,7 @@ char string_peek(String string, isz index)
 	if (index < 0) index = string.count - index;
 	if (index < string.count)
 	{
-		return string.bytes[index];
+		return string.chars[index];
 	}
 	return 0;
 }
@@ -2259,9 +2395,9 @@ String string_trim_blank_lines(String string)
 
 	for (isz i = 0; i < string.count; i += 1)
 	{
-		if (char_is_whitespace(string.bytes[i]))
+		if (char_is_whitespace(string.chars[i]))
 		{
-			if (string.bytes[i] == '\n')
+			if (string.chars[i] == '\n')
 			{
 				start = i + 1;
 			}
@@ -2276,9 +2412,9 @@ String string_trim_blank_lines(String string)
 
 	for (isz i = string.count - 1; i >= 0; i -= 1)
 	{
-		if (char_is_whitespace(string.bytes[i]))
+		if (char_is_whitespace(string.chars[i]))
 		{
-			if (string.bytes[i] == '\n')
+			if (string.chars[i] == '\n')
 			{
 				end = i + 1;
 			}
@@ -2295,7 +2431,7 @@ String string_trim_blank_lines(String string)
 String string_skip(String string, isz amount)
 {
 	amount = CLAMP(amount, 0, string.count);
-	string.bytes += amount;
+	string.chars += amount;
 	string.count -= amount;
 	return string;
 }
@@ -2330,7 +2466,7 @@ String_Pair string_split_line(String string)
 	isz i = j;
 	if (j < string.count)
 	{
-		if (i > 0 && string.bytes[i - 1] == '\r')
+		if (i > 0 && string.chars[i - 1] == '\r')
 		{
 			i -= 1;
 		}
@@ -2362,8 +2498,8 @@ String_Pair string_split_around_char(String string, char c)
 String_Pair string_split_word(String string)
 {
 	isz i, j;
-	for (i = 0; i < string.count &&  char_is_whitespace(string.bytes[i]); i += 1);
-	for (j = i; j < string.count && !char_is_whitespace(string.bytes[j]); j += 1);
+	for (i = 0; i < string.count &&  char_is_whitespace(string.chars[i]); i += 1);
+	for (j = i; j < string.count && !char_is_whitespace(string.chars[j]); j += 1);
 
 	if (i < j)
 	{
@@ -2381,14 +2517,14 @@ String_Pair string_split_word(String string)
 String_Pair string_split_identifier(String string)
 {
 	isz i, j;
-	for (i = 0; i < string.count &&  char_is_whitespace(string.bytes[i]); i += 1);
+	for (i = 0; i < string.count &&  char_is_whitespace(string.chars[i]); i += 1);
 
 	j = i;
-	if (j < string.count && (char_is_alphabetic(string.bytes[j]) || string.bytes[j] == '_'))
+	if (j < string.count && (char_is_alphabetic(string.chars[j]) || string.chars[j] == '_'))
 	{
 		j += 1;
 
-		while (j < string.count && (char_is_alphanumeric(string.bytes[j]) || string.bytes[j] == '_'))
+		while (j < string.count && (char_is_alphanumeric(string.chars[j]) || string.chars[j] == '_'))
 		{
 			j += 1;
 		}
@@ -2426,8 +2562,8 @@ Parse_Number_Result string_parse_u64(String string)
 {
 	Parse_Number_Result result = {0};
 
-	char *at  = string.bytes;
-	char *end = string.bytes + string.count;
+	char *at  = string.chars;
+	char *end = string.chars + string.count;
 
 	while (at < end && char_is_whitespace(at[0]))
 	{
@@ -2505,7 +2641,7 @@ Parse_Number_Result string_parse_u64(String string)
 			result.is_valid   = true;
 			result.value_u64  = value;
 			result.overflowed = overflow;
-			result.advance    = at - string.bytes;
+			result.advance    = at - string.chars;
 		}
 	}
 
@@ -2521,13 +2657,13 @@ Parse_Number_Result string_parse_i64(String string)
 	i32 sign = 1;
 	while (!string_empty(iter))
 	{
-		/**/ if (string.bytes[0] == '-') { sign *= -1; iter = string_skip(iter, 1); }
-		else if (string.bytes[0] == '+') {             iter = string_skip(iter, 1); }
+		/**/ if (string.chars[0] == '-') { sign *= -1; iter = string_skip(iter, 1); }
+		else if (string.chars[0] == '+') {             iter = string_skip(iter, 1); }
 		else break;
 	}
 
 	Parse_Number_Result result = string_parse_u64(string);
-	result.advance += iter.bytes - string.bytes;
+	result.advance += iter.chars - string.chars;
 
 	u64 max_value = (u64)INT64_MAX;
 	if (sign == -1) max_value += 1;
@@ -2648,7 +2784,7 @@ Parse_Number_Result string_parse_f64(String string)
 
 	if (result.is_valid)
 	{
-		result.advance = (iter.bytes - string.bytes) + (end - buffer);
+		result.advance = (iter.chars - string.chars) + (end - buffer);
 	}
 
 	return result;
@@ -2714,7 +2850,7 @@ isz sb_appendc(String_Builder *sb, char c)
 
 isz sb_appends(String_Builder *sb, String s)
 {
-	char *at      = s.bytes;
+	char *at      = s.chars;
 	isz   to_copy = s.count;
 	while (to_copy > 0)
 	{
@@ -2846,9 +2982,9 @@ isz sb_append_reindented(String_Builder *sb, String str, isz indent_delta, Strin
 		isz first_non_whitespace = INT64_MAX;
 		for (isz i = 0; i < line.count; i += 1)
 		{
-			if (!char_is_whitespace(line.bytes[i]))
+			if (!char_is_whitespace(line.chars[i]))
 			{
-				if (!(flags & String_Reindent_left_justify_preprocessor_defines) || line.bytes[i] != '#')
+				if (!(flags & String_Reindent_left_justify_preprocessor_defines) || line.chars[i] != '#')
 				{
 					first_non_whitespace = i;
 				}
@@ -2915,7 +3051,7 @@ String sb_flatten(Arena *arena, String_Builder *sb)
 	isz at = 0;
 	for (String_Builder_Chunk *chunk = sb->first_chunk; chunk; chunk = chunk->next)
 	{
-		copy_bytes(&result.bytes[at], &chunk->bytes[0], chunk->count);
+		copy_bytes(&result.chars[at], &chunk->bytes[0], chunk->count);
 		at += chunk->count;
 	}
 
@@ -3449,7 +3585,7 @@ bool os_write_entire_file(String path, Memory memory)
 	Arena_ScopedTemp {
 		String16 path16 = utf16_from_utf8(temp, path);
 
-		HANDLE handle = CreateFileW(path16.bytes, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		HANDLE handle = CreateFileW(path16.chars, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
 		if (handle != INVALID_HANDLE_VALUE)
 		{
@@ -3474,7 +3610,7 @@ Memory os_read_entire_file(Arena *arena, String path)
 	Arena_ScopedTemp {
 		String16 path16 = utf16_from_utf8(temp, path);
 
-		HANDLE handle = CreateFileW(path16.bytes, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		HANDLE handle = CreateFileW(path16.chars, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (handle != INVALID_HANDLE_VALUE)
 		{
 			DWORD file_size_high;
@@ -3511,6 +3647,246 @@ Memory os_read_entire_file(Arena *arena, String path)
 #else // defined(_WIN32)
 #error TODO: Other platforms
 #endif
+
+//
+// Debugging
+//
+
+bool os_is_debugger_attached(void)
+{
+#if defined(_WIN32)
+	return IsDebuggerPresent();
+#else
+#error TODO: Other platforms
+#endif
+}
+
+//
+// Logging
+//
+
+void set_log_level_enabled(Log_Level level, bool enabled)
+{
+	_G->log_level_enabled[level] = enabled;
+}
+
+String log_level_to_string(Log_Level level)
+{
+	switch (level)
+	{
+		case Log_Level_debug:   return S("debug");
+		case Log_Level_info:    return S("info");
+		case Log_Level_warning: return S("warning");
+		case Log_Level_error:   return S("error");
+		case Log_Level_fatal:   return S("fatal");
+	}
+	return S("<invalid>");
+}
+
+void logf(Log_Level level, String file, isz line, char const *fmt, ...)
+{
+	if (!_G->log_level_enabled[level]) return;
+
+	va_list args;
+	va_start(args, fmt);
+
+	logf_va(level, file, line, fmt, args);
+
+	va_end(args);
+}
+
+void logf_va(Log_Level level, String file, isz line, char const *fmt, va_list args)
+{
+	if (!_G->log_level_enabled[level]) return;
+
+	Arena_ScopedTemp {
+		String message = string_format_va(temp, fmt, args);
+		String level_string = log_level_to_string(level);
+		String result = string_format(temp, "[%.*s] %.*s:%zd: %.*s\n", Sx(level_string), Sx(file), line, Sx(message));
+
+		fprintf(stderr, "%.*s", Sx(result));
+
+#if defined(_WIN32)
+		OutputDebugStringA(result.chars);
+#endif
+
+		if (level >= Log_Level_error)
+		{
+			if (os_is_debugger_attached())
+			{
+				debug_break();
+			}
+		}
+
+		if (level == Log_Level_fatal)
+		{
+			exit(-1);
+		}
+	}
+}
+
+//
+// Testing
+//
+
+void test_run(Test_Context *t, String name, Test_Suite suite)
+{
+	isz ran_before    = t->ran_count;
+	isz failed_before = t->failed_count;
+
+	suite(t);
+
+	isz ran    = t->ran_count - ran_before;
+	isz failed = t->failed_count - failed_before;
+
+	LOG(info, "Ran test suite \"%cs\" with %zd checks of which %zd failed\n", name, ran, failed);
+}
+
+void test_expect(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+
+	test_expect_va(t, condition, file, line, expression, fmt, args);
+
+	va_end(args);
+}
+
+void test_expect_va(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, va_list args)
+{
+	t->ran_count += 1;
+
+	if (condition == false)
+	{
+		t->failed_count += 1;
+
+		Arena_ScopedTemp {
+			String message = string_format_va(temp, fmt, args);
+			if (!string_empty(message))
+			{
+				logf(Log_Level_error, file, line, "TEST_EXPECT(%cs) failed: %cs", expression, message);
+			}
+			else
+			{
+				logf(Log_Level_error, file, line, "TEST_EXPECT(%cs) failed!", expression);
+			}
+		}
+	}
+}
+
+int test_report(Test_Context *t)
+{
+	LOG(info, "Ran %zd tests, %zd failed.", t->ran_count, t->failed_count);
+	return t->failed_count > 0;
+}
+
+//
+// TLS
+//
+
+TLS_Handle tls_allocate(void)
+{
+#if defined(_WIN32)
+	TLS_Handle result = {
+		.handle = TlsAlloc(),
+	};
+	result.is_allocated = result.handle != TLS_OUT_OF_INDEXES;
+#else
+	TLS_Handle result = {0};
+	result.is_allocated = (pthread_key_create(&result.handle, NULL) == 0);
+#endif
+	return result;
+}
+
+bool tls_free(TLS_Handle handle)
+{
+#if defined(_WIN32)
+	bool result = TlsFree(handle.handle);
+#else
+	bool result = (pthread_key_delete(handle.handle) == 0);
+#endif
+	return result;
+}
+
+bool tls_is_valid(TLS_Handle handle)
+{
+	return handle.is_allocated;
+}
+
+void *tls_get(TLS_Handle handle)
+{
+#if defined(_WIN32)
+	void *result = TlsGetValue(handle.handle);
+#else
+	void *result = pthread_getspecific(handle.handle);
+#endif
+	return result;
+}
+
+void tls_set(TLS_Handle handle, void *value)
+{
+#if defined(_WIN32)
+	TlsSetValue(handle.handle, value);
+#else
+	pthread_setspecific(handle.handle, value);
+#endif
+}
+
+//
+// Library init
+//
+
+void dc_init(int argc, char **argv, DC_Config const *config)
+{
+	(void)config;
+
+	_G = arena_bootstrap(DC_Context, arena);
+	_G->tctx = tls_allocate();
+	_G->argc = argc;
+	_G->argv = argv;
+
+	for (isz i = 0; i < Log_Level_COUNT; i += 1)
+	{
+		_G->log_level_enabled[i] = true;
+	}
+}
+
+DC_Context *dc_get_context(void)
+{
+	return _G;
+}
+
+void dc_set_context(DC_Context *context)
+{
+	_G = context;
+}
+
+Thread_Context *get_tctx(void)
+{
+	Thread_Context *result = tls_get(_G->tctx);
+
+	if (result == NULL)
+	{
+		result = arena_alloc_struct(_G->arena, Thread_Context);
+		tls_set(_G->tctx, result);
+	}
+
+	return result;
+}
+
+//
+// Entry Point
+//
+
+#ifndef DC_NO_ENTRY_POINT
+int main(int argc, char **argv)
+{
+	dc_init(argc, argv, NULL);
+	return entry_point();
+}
+#endif
+
+// !END!
 
 /* -----------------------------------------------------------------------------------------------------
    What follows is the implementation of stbsprintf, check the bottom of the file for its license.

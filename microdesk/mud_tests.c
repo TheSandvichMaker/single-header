@@ -3,8 +3,8 @@
 #include <dc.h>
 
 #define MUD_STRING String
-#define MUD_STRING_BYTES(str) ((char const *)(str).bytes)
-#define MUD_STRING_BYTES_ASSIGN(str, value) (str).bytes = (char *)(value)
+#define MUD_STRING_BYTES(str) ((char const *)(str).chars)
+#define MUD_STRING_BYTES_ASSIGN(str, value) (str).chars = (char *)(value)
 #define MUD_STRING_COUNT(str) ((Mud_Int)((str).count))
 #define MUD_STRING_COUNT_ASSIGN(str, value) ((str).count = (isz)value)
 
@@ -19,12 +19,9 @@ global Mud_Node mud_nodes[1u << 16];
 
 void mud_print(String_Builder *builder, Mud_Node *node, bool one_liner);
 
-int main(int argc, char **argv)
+int entry_point(void)
 {
-	(void)argc;
-	(void)argv;
-
-	arena = arena_make_default(S("arena"));
+	arena = arena_make(S("arena"));
 
 	String api_mud = string_from_memory(os_read_entire_file(arena, S("api.mud")));
 	if (string_empty(api_mud))
@@ -50,8 +47,6 @@ int main(int argc, char **argv)
 
 	return 0;
 }
-
-
 
 void mud_print(String_Builder *builder, Mud_Node *node, bool one_liner)
 {

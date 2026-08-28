@@ -5,7 +5,12 @@ copy microdesk\api.mud build\api.mud
 if not exist build mkdir build
 pushd build
 
+set FLAGS=/nologo /I..\dc /W4 /WX /ZI /wd4201
+
 REM microdesk
-cl /nologo ../microdesk/mud_tests.c /I../dc /W4 /WX /Zi /wd4201
+cl ../microdesk/mud_tests.c %FLAGS%
+
+REM dc
+cl ../dc/dc_tests.c %FLAGS%
 
 popd build
