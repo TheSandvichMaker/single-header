@@ -290,9 +290,9 @@ MUD_API Mud_Parse_Result mud_parse_from_string(Mud_Parser *parser, Mud_Node *nod
 MUD_API Mud_Node *mud_nil(void);
 MUD_API Mud_Bool mud_is_nil(Mud_Node *node);
 MUD_API Mud_Node *mud_get_tag(Mud_Node *node, MUD_STRING name);
-MUD_API Mud_Bool mud_tag_is_true(Mud_Node *node, MUD_STRING name);
+MUD_API Mud_Bool mud_has_tag(Mud_Node *node, MUD_STRING name);
 MUD_API Mud_Node *mud_get_child(Mud_Node *node, MUD_STRING name);
-MUD_API Mud_Bool mud_child_is_true(Mud_Node *node, MUD_STRING name);
+MUD_API Mud_Bool mud_has_child(Mud_Node *node, MUD_STRING name);
 
 #endif
 
@@ -304,6 +304,8 @@ MUD_API Mud_Bool mud_child_is_true(Mud_Node *node, MUD_STRING name);
 
 MUD_INLINE void mud_error(Mud_Parser *p, Mud_Node *node, Mud_Error error_code, MUD_STRING message)
 {
+	if (p->error != Mud_Error_none) return;
+
 	if (!mud_is_nil(node))
 	{
 		node->flags |= Mud_Node_Flag_invalid;
@@ -806,17 +808,10 @@ MUD_INLINE MUD_STRING mud_parse_comment(Mud_Parser *p)
 	return comment;
 }
 
-MUD_INLINE void mud_memset(void *mem, uint8_t value, Mud_Int count)
-{
-	uint8_t *bytes = (uint8_t *)mem;
-	for (Mud_Int i = 0; i < count; i += 1)
-	{
-		bytes[i] = value;
-	}
-}
-
 MUD_INLINE void mud_parse_object_style_value(Mud_Parser *p, Mud_Node *node, Mud_Token closing)
 {
+	while (mud_eat_token(p, Mud_Token_comment));
+
 	char const *start = p->token.start;
 	char const *end   = p->token.start;
 
@@ -828,7 +823,7 @@ MUD_INLINE void mud_parse_object_style_value(Mud_Parser *p, Mud_Node *node, Mud_
 
 	Mud_Int iter = 0;
 
-	while (mud_keep_parsing(p) && !mud_peek_token(p, Mud_Token_comment) && !mud_peek_token(p, closing))
+	while (mud_keep_parsing(p) && !mud_peek_token(p, Mud_Token_comment))
 	{
 		if (p->token.kind == '[') bracket_depth += 1;
 		if (p->token.kind == '{') brace_depth   += 1;
@@ -887,6 +882,8 @@ MUD_INLINE void mud_parse_object_style_value(Mud_Parser *p, Mud_Node *node, Mud_
 
 MUD_INLINE void mud_parse_array_style_value(Mud_Parser *p, Mud_Node *node)
 {
+	while (mud_eat_token(p, Mud_Token_comment));
+
 	node->flags         |= p->token.flags;
 	node->value          = p->token.value;
 	node->value_unquoted = node->value;
@@ -909,57 +906,22 @@ MUD_INLINE void mud_parse_array_style_value(Mud_Parser *p, Mud_Node *node)
 	}
 }
 
-MUD_INLINE void mud_parse_tag_arguments(Mud_Parser *p, Mud_Node *node)
+enum
 {
-	Mud_Node *first_child = mud_nil();
-	Mud_Node *last_child  = mud_nil();
+	Mud_Parse_Flag_allow_objects             = (1u << 0),
+	Mud_Parse_Flag_allow_arrays              = (1u << 1),
+	Mud_Parse_Flag_allow_object_style_values = (1u << 2),
+	Mud_Parse_Flag_allow_array_style_values  = (1u << 3),
+	Mud_Parse_Flag_expect_names              = (1u << 4),
+	Mud_Parse_Flag_allow_tags                = (1u << 5),
+	Mud_Parse_Group_objects  = Mud_Parse_Flag_allow_tags|Mud_Parse_Flag_allow_objects|Mud_Parse_Flag_allow_arrays|Mud_Parse_Flag_allow_object_style_values|Mud_Parse_Flag_expect_names,
+	Mud_Parse_Group_arrays   = Mud_Parse_Flag_allow_tags|Mud_Parse_Flag_allow_objects|Mud_Parse_Flag_allow_arrays|Mud_Parse_Flag_allow_array_style_values,
+	Mud_Parse_Group_tag_args = Mud_Parse_Flag_allow_object_style_values|Mud_Parse_Flag_expect_names,
+};
 
-	while (mud_keep_parsing(p))
-	{
-		MUD_STRING name = p->token.value;
-
-		if (!mud_eat_token(p, Mud_Token_identifier))
-		{
-			mud_error(p, node, Mud_Error_syntax_error, MUD_TEXT("Expected identifier"));
-			goto bail;
-		}
-
-		Mud_Node *child = mud_allocate_node(p);
-
-		mud_set_name(child, name);
-		child->line = p->token.line;
-		child->col  = p->token.col;
-
-		if (mud_eat_token(p, '='))
-		{
-			mud_parse_object_style_value(p, child, ')');
-		}
-		else
-		{
-			mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Tag arguments must be in the form 'name = value'"));
-			goto bail;
-		}
-
-		mud_add_node(&first_child, &last_child, child);
-
-		if (mud_eat_token(p, ')'))
-		{
-			break;
-		}
-		else if (!mud_eat_token(p, ','))
-		{
-			mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Expected , or ) after tag argument"));
-			goto bail;
-		}
-	}
-
-bail:
-	node->first_child = first_child;
-}
-
-MUD_INLINE void mud_parse_element(Mud_Parser *p, Mud_Node *node, bool is_object, Mud_Token end_token)
+MUD_INLINE void mud_parse_element(Mud_Parser *p, Mud_Node *node, Mud_Int parse_flags, Mud_Token end_token)
 {
-	if (is_object)
+	if (parse_flags == Mud_Parse_Group_objects)
 	{
 		node->flags |= Mud_Node_Flag_is_object;
 	}
@@ -988,44 +950,55 @@ MUD_INLINE void mud_parse_element(Mud_Parser *p, Mud_Node *node, bool is_object,
 		Mud_Node *first_tag = mud_nil();
 		Mud_Node *last_tag  = mud_nil();
 
-		while (mud_eat_token(p, '@'))
+		if (mud_peek_token(p, '@'))
 		{
-			MUD_STRING name = p->token.value;
-
-			if (!mud_eat_token(p, Mud_Token_identifier))
+			if (!(parse_flags & Mud_Parse_Flag_allow_tags))
 			{
-				mud_error(p, NULL, Mud_Error_syntax_error, MUD_TEXT("Expected identifier after '@'"));
+				mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Tag is not allowed"));
 				goto bail;
 			}
 
-			Mud_Node *tag = mud_allocate_node(p);
-			tag->flags |= Mud_Node_Flag_is_tag;
-
-			mud_set_name(tag, name);
-
-			p->parent = tag;
-
-			if (mud_eat_token(p, '('))
+			while (mud_eat_token(p, '@'))
 			{
-				mud_parse_tag_arguments(p, tag);
-			}
+				MUD_STRING name = p->token.value;
 
-			if (!mud_is_nil(tag->first_child))
-			{
-				tag->flags |= Mud_Node_Flag_has_children;
-			}
+				if (!mud_eat_token(p, Mud_Token_identifier))
+				{
+					mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Expected identifier after '@'"));
+					goto bail;
+				}
 
-			p->parent = tag->parent;
+				while (mud_eat_token(p, Mud_Token_comment));
 
-			// Consume a newline is it if there so that we can attach to nodes on the next line without issue.
-			if (p->token.is_newline) mud_next_token(p);
+				Mud_Node *tag = mud_allocate_node(p);
+				tag->flags |= Mud_Node_Flag_is_tag;
+
+				mud_set_name(tag, name);
+
+				p->parent = tag;
+
+				if (mud_eat_token(p, '('))
+				{
+					mud_parse_element(p, tag, Mud_Parse_Group_tag_args, ')');
+				}
+
+				if (!mud_is_nil(tag->first_child))
+				{
+					tag->flags |= Mud_Node_Flag_has_children;
+				}
+
+				p->parent = tag->parent;
+
+				// Consume a newline is it if there so that we can attach to nodes on the next line without issue.
+				if (p->token.is_newline) mud_next_token(p);
 		
-			mud_add_node(&first_tag, &last_tag, tag);
+				mud_add_node(&first_tag, &last_tag, tag);
+			}
 		}
 
 		MUD_STRING name = mud_string(NULL, 0);
 		
-		if (is_object)
+		if (parse_flags & Mud_Parse_Flag_expect_names)
 		{
 			name = p->token.value;
 
@@ -1036,25 +1009,39 @@ MUD_INLINE void mud_parse_element(Mud_Parser *p, Mud_Node *node, bool is_object,
 			}
 		}
 
+		while (mud_eat_token(p, Mud_Token_comment));
+
 		mud_set_name(child, name);
 		child->line            = p->token.line;
 		child->col             = p->token.col;
 		child->first_tag       = first_tag;
 		child->leading_comment = leading_comment;
 
-		if (mud_eat_token(p, '{'))
+		/**/ if (mud_eat_token(p, '{'))
 		{
-			mud_parse_element(p, child, true, '}');
+			if (!(parse_flags & Mud_Parse_Flag_allow_objects))
+			{
+				mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Object is not allowed")); goto bail;
+			}
+			mud_parse_element(p, child, Mud_Parse_Group_objects, '}');
 		}
 		else if (mud_eat_token(p, '['))
 		{
-			mud_parse_element(p, child, false, ']');
+			if (!(parse_flags & Mud_Parse_Flag_allow_arrays))
+			{
+				mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Array is not allowed")); goto bail;
+			}
+			mud_parse_element(p, child, Mud_Parse_Group_arrays, ']');
 		}
-		else if (is_object && mud_eat_token(p, '='))
+		else if (mud_eat_token(p, '='))
 		{
+			if (!(parse_flags & Mud_Parse_Flag_allow_object_style_values))
+			{
+				mud_error(p, child, Mud_Error_syntax_error, MUD_TEXT("Object-style value is not allowed")); goto bail;
+			}
 			mud_parse_object_style_value(p, child, end_token);
 		}
-		else if (!is_object)
+		else if (parse_flags & Mud_Parse_Flag_allow_array_style_values)
 		{
 			mud_parse_array_style_value(p, child);
 		}
@@ -1098,14 +1085,23 @@ bail:
 	}
 }
 
+MUD_INLINE void mud_memset(void *mem, uint8_t value, Mud_Int count)
+{
+	uint8_t *bytes = (uint8_t *)mem;
+	for (Mud_Int i = 0; i < count; i += 1)
+	{
+		bytes[i] = value;
+	}
+}
+
 Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mud_Int nodes_buffer_size, MUD_STRING source)
 {
 	mud_memset(p, 0, sizeof(*p));
 	p->out_nodes = nodes_buffer;
 	p->out_node_capacity = nodes_buffer_size;
 	p->source = source;
-	p->at     = (char *)MUD_STRING_BYTES(source);
-	p->end    = (char *)MUD_STRING_BYTES(source) + MUD_STRING_COUNT(source);
+	p->at     = (char const *)MUD_STRING_BYTES(source);
+	p->end    = (char const *)MUD_STRING_BYTES(source) + MUD_STRING_COUNT(source);
 	p->line   = 1;
 
 	mud_next_token(p);
@@ -1116,7 +1112,7 @@ Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mu
 
 	if (!mud_is_nil(result.root))
 	{
-		mud_parse_element(p, result.root, true, Mud_Token_eof);
+		mud_parse_element(p, result.root, Mud_Parse_Group_objects, Mud_Token_eof);
 		result.root->flags |= Mud_Node_Flag_is_root;
 
 		result.error            = p->error;
@@ -1167,9 +1163,9 @@ Mud_Node *mud_get_tag(Mud_Node *node, MUD_STRING name)
 	return mud_nil();
 }
 
-Mud_Bool mud_tag_is_true(Mud_Node *node, MUD_STRING name)
+Mud_Bool mud_has_tag(Mud_Node *node, MUD_STRING name)
 {
-	return !!(mud_get_tag(node, name)->flags & Mud_Node_Flag_is_true);
+	return !mud_is_nil(mud_get_tag(node, name));
 }
 
 Mud_Node *mud_get_child(Mud_Node *node, MUD_STRING name)
@@ -1184,9 +1180,9 @@ Mud_Node *mud_get_child(Mud_Node *node, MUD_STRING name)
 	return mud_nil();
 }
 
-Mud_Bool mud_child_is_true(Mud_Node *node, MUD_STRING name)
+Mud_Bool mud_has_child(Mud_Node *node, MUD_STRING name)
 {
-	return !!(mud_get_child(node, name)->flags & Mud_Node_Flag_is_true);
+	return !mud_is_nil(mud_get_child(node, name));
 }
 
 #endif

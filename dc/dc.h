@@ -391,7 +391,7 @@ fn void arena_reset_temp_arenas(void);
 // Usage: printf("%.*s", Sx(string));
 #define Sx(str) (int)(str).count, (str).chars
 
-#define S16(text) DC_COMPOUND_LIT(String16) { (u16 *)(L"" text), sizeof(L"" text) / sizeof(wchar_t) - 1 }
+#define S16(text) DC_COMPOUND_LIT(String16) { (u16 *)(L"" text), sizeof(L"" text) / sizeof(u16) - 1 }
 
 // Single Character
 fn bool char_is_whitespace(char c);
@@ -551,8 +551,12 @@ fn String string_tail(String string, isz length);
 fn String_Pair string_split_line(String string);
 fn String_Pair string_split_around(String string, String separator);
 fn String_Pair string_split_around_char(String string, char c);
+
+fn bool string_eat_char(String *string, char c);
+fn bool string_eat(String *string, String str);
 /*
-	A word for the purposes of this function is just any uninterrupted chain of non-whitespace characters
+	A word for the purposes of this function is just any uninterrupted
+	chain of non-whitespace characters
 */
 fn String_Pair string_split_word(String string);
 fn String_Pair string_split_identifier(String string);
@@ -2568,7 +2572,7 @@ String_Pair string_split_line(String string)
 	}
 	String_Pair result;
 	result.l = substring_range(string, 0, i);
-	result.r = substring_range(string, j, string.count);
+	result.r = substring_range(string, j + 1, string.count);
 	return result;
 }
 
@@ -2588,6 +2592,26 @@ String_Pair string_split_around_char(String string, char c)
 	result.l = substring_range(string, 0, i);
 	result.r = substring_range(string, i + 1, string.count);
 	return result;
+}
+
+bool string_eat_char(String *string, char c)
+{
+	if (string_peek(*string, 0) == c)
+	{
+		*string = string_skip(*string, 1);
+		return true;
+	}
+	return false;
+}
+
+bool string_eat(String *string, String str)
+{
+	if (string_match_prefix(*string, str, 0))
+	{
+		*string = string_skip(*string, str.count);
+		return true;
+	}
+	return false;
 }
 
 String_Pair string_split_word(String string)
@@ -2679,9 +2703,9 @@ Parse_Number_Result string_parse_u64(String string)
 		return result;
 	}
 
-    i64 base = 10;
+	i64 base = 10;
 	if (at[0] == '0' && at + 1 < end)
-    { 
+	{ 
 		if (at[1] >= '1' && at[1] <= '9')
 		{
 			base = 8;
@@ -3012,6 +3036,8 @@ isz sb_appendf(String_Builder *sb, char const *fmt, ...)
 
 isz sb_appendf_va(String_Builder *sb, char const *fmt, va_list args)
 {
+	if (sb->deactivate) return 0;
+
 	isz start_count = sb->total_count;
 
 	char buffer[512];
