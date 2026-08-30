@@ -713,6 +713,7 @@ typedef enum String_Table_Align_Mode
 {
 	String_Table_Align_Mode_left,
 	String_Table_Align_Mode_right,
+	String_Table_Align_Mode_none,
 	String_Table_Align_Mode_COUNT,
 } String_Table_Align_Mode;
 
@@ -728,6 +729,7 @@ typedef struct String_Table_Column_Setup
 typedef struct String_Table_Row
 {
 	struct String_Table_Row *next;
+	u64     column_skipped;
 	isz     column_count;
 	String *column_values;
 	String  custom_value;
@@ -754,10 +756,11 @@ fn void string_table_set_column_prefix(String_Table_Writer *writer, isz column_i
 fn void string_table_set_column_suffix(String_Table_Writer *writer, isz column_index, String string);
 fn void string_table_set_row_prefix   (String_Table_Writer *writer, String string);
 fn void string_table_set_row_suffix   (String_Table_Writer *writer, String string);
-fn void string_table_set_up_column    (String_Table_Writer *table, isz column_index, String label, String_Table_Align_Mode align);
+fn void string_table_column_setup     (String_Table_Writer *table, isz column_index, String_Table_Column_Setup const *setup);
 fn void string_table_custom_row       (String_Table_Writer *table, String contents);
 fn void string_table_next_row         (String_Table_Writer *table);
 fn void string_table_column           (String_Table_Writer *table, String value);
+fn void string_table_skip_column      (String_Table_Writer *table);
 fn void string_table_columnf          (String_Table_Writer *table, const char *fmt, ...);
 fn void string_table_columnf_va       (String_Table_Writer *table, const char *fmt, va_list args);
 fn bool string_table_write            (String_Table_Writer *table, String_Builder *builder);
@@ -2721,11 +2724,7 @@ Parse_Number_Result string_parse_u64(String string)
 			base = 2;
 			at += 2;
 		}
-		else
-		{
-			base = -1;
-		}
-    }
+	}
 
 	if (base > 0)
 	{
@@ -3278,13 +3277,10 @@ void string_table_set_column_suffix(String_Table_Writer *writer, isz column_inde
 	}
 }
 
-void string_table_set_up_column(String_Table_Writer *table, isz column_index, String label, String_Table_Align_Mode align)
+void string_table_column_setup(String_Table_Writer *table, isz column_index, String_Table_Column_Setup const *setup)
 {
 	dc_assert(column_index >= 0 && column_index < table->column_count);
-
-	String_Table_Column_Setup *setup = &table->columns[column_index];
-	setup->label = label;
-	setup->align = align;
+	table->columns[column_index] = *setup;
 }
 
 void string_table_custom_row(String_Table_Writer *table, String contents)
@@ -3328,6 +3324,15 @@ void string_table_column(String_Table_Writer *table, String value)
 	column->max_width = MAX(column->max_width, total_width);
 }
 
+void string_table_skip_column(String_Table_Writer *table)
+{
+	String_Table_Row *row = table->last_row;
+
+	dc_assert(row->column_count < table->column_count);
+	isz column_index = row->column_count++;
+	row->column_skipped |= (1ull << column_index);
+}
+
 void string_table_columnf(String_Table_Writer *table, const char *fmt, ...)
 {
 	va_list args;
@@ -3361,8 +3366,8 @@ bool string_table_write(String_Table_Writer *table, String_Builder *builder)
 	{
 		if (!string_empty(row->custom_value))
 		{
-			// hmm... yes or no? or make it customizable
 			sb_appends(builder, row->custom_value);
+			// hmm... yes or no? or make it customizable
 			sb_newline(builder);
 		}
 		else
@@ -3372,6 +3377,11 @@ bool string_table_write(String_Table_Writer *table, String_Builder *builder)
 
 			for (isz column_index = 0; column_index < row->column_count; column_index += 1)
 			{
+				if (row->column_skipped & (1ull << column_index))
+				{
+					continue;
+				}
+
 				result = true;
 
 				String_Table_Column_Setup *column = &table->columns[column_index];
@@ -3390,13 +3400,23 @@ bool string_table_write(String_Table_Writer *table, String_Builder *builder)
 				sb_appends(builder, value);
 				sb_appends(builder, column->suffix);
 
-				if (column_index + 1 < row->column_count)
+				isz next_column_index = column_index + 1;
+				while ((row->column_skipped & (1ull << next_column_index)) && next_column_index < row->column_count)
+				{
+					next_column_index += 1;
+				}
+
+				if (next_column_index < row->column_count)
 				{
 					sb_appends(builder, table->row_separator);
 
-					if (column->align == String_Table_Align_Mode_left)
+					String_Table_Column_Setup *next_column = &table->columns[next_column_index];
+					if (next_column->align != String_Table_Align_Mode_none)
 					{
-						sb_append_spaces(builder, padding);
+						if (column->align == String_Table_Align_Mode_left)
+						{
+							sb_append_spaces(builder, padding);
+						}
 					}
 				}
 			}
