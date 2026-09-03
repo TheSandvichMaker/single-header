@@ -709,6 +709,8 @@ fn bool sb_verify(String_Builder *sb);
 // String Table Writer
 //
 
+#define STRING_TABLE_WRITER_MAX_COLUMNS 16
+
 typedef enum String_Table_Align_Mode
 {
 	String_Table_Align_Mode_left,
@@ -741,6 +743,8 @@ typedef struct String_Table_Writer
 
 	isz                        column_count;
 	String_Table_Column_Setup *columns;
+
+	bool do_column_packing;
 
 	String row_prefix;
 	String row_suffix;
@@ -2783,7 +2787,7 @@ Parse_Number_Result string_parse_i64(String string)
 	Parse_Number_Result result = string_parse_u64(iter);
 	result.advance += iter.chars - string.chars;
 
-	u64 max_value = (u64)INT64_MAX;
+	u64 max_value = (u64)INT64_MAX + (sign == -1 ? 1 : 0);
 	if (result.value_u64 >= max_value)
 	{
 		result.value_i64 = sign == 1 ? INT64_MAX : INT64_MIN;
@@ -3240,15 +3244,16 @@ bool sb_verify(String_Builder *sb)
 
 void string_table_writer_init(String_Table_Writer *writer, Arena *arena, isz column_count)
 {
-	writer->arena          = arena;
-	writer->column_count   = column_count;
-	writer->columns        = arena_alloc_array(arena, column_count, String_Table_Column_Setup);
-	writer->row_prefix     = S("");
-	writer->row_suffix     = S("");
-	writer->row_separator  = S(" ");
-	writer->first_row      = NULL;
-	writer->last_row       = NULL;
-	writer->first_free_row = NULL;
+	writer->arena             = arena;
+	writer->column_count      = column_count;
+	writer->columns           = arena_alloc_array(arena, column_count, String_Table_Column_Setup);
+	writer->row_prefix        = S("");
+	writer->row_suffix        = S("");
+	writer->row_separator     = S(" ");
+	writer->do_column_packing = false;
+	writer->first_row         = NULL;
+	writer->last_row          = NULL;
+	writer->first_free_row    = NULL;
 }
 
 void string_table_set_row_prefix(String_Table_Writer *writer, String string)
@@ -3362,6 +3367,41 @@ bool string_table_write(String_Table_Writer *table, String_Builder *builder)
 {
 	bool result = false;
 
+	isz pack_factor[STRING_TABLE_WRITER_MAX_COLUMNS] = {0};
+
+	if (table->do_column_packing)
+	{
+		for (isz column_index = 1; column_index < table->column_count; column_index += 1)
+		{
+			String_Table_Column_Setup const *prev_col = &table->columns[column_index - 1];
+
+			isz column_pack_factor = INT64_MAX;
+
+			for (String_Table_Row *row = table->first_row; row; row = row->next)
+			{
+				if (column_index >= row->column_count || (row->column_skipped & (1ull << column_index)))
+				{
+					continue;
+				}
+
+				String value_prev = row->column_values[column_index - 1];
+				String value      = row->column_values[column_index];
+
+				isz leading_spaces = 0;
+				for (; leading_spaces < value.count; leading_spaces += 1)
+				{
+					if (value.chars[leading_spaces] != ' ') break;
+				}
+
+				isz col_space = (prev_col->max_width - value_prev.count) + leading_spaces;
+
+				column_pack_factor = MIN(column_pack_factor, col_space);
+			}
+
+			pack_factor[column_index] = column_pack_factor;
+		}
+	}
+
 	for (String_Table_Row *row = table->first_row; row; row = row->next)
 	{
 		if (!string_empty(row->custom_value))
@@ -3374,6 +3414,8 @@ bool string_table_write(String_Table_Writer *table, String_Builder *builder)
 		{
 			sb_append_line_indent(builder);
 			sb_appends(builder, table->row_prefix);
+
+			isz next_column_trim = 0;
 
 			for (isz column_index = 0; column_index < row->column_count; column_index += 1)
 			{
@@ -3390,6 +3432,22 @@ bool string_table_write(String_Table_Writer *table, String_Builder *builder)
 				isz max_width = column->max_width;
 				isz padding   = max_width - value.count;
 				dc_assert(padding >= 0);
+
+				if (next_column_trim > 0)
+				{
+					value = string_skip(value, next_column_trim);
+					next_column_trim = 0;
+				}
+
+				if (table->do_column_packing && column_index + 1 < row->column_count)
+				{
+					padding = padding - pack_factor[column_index + 1];
+					if (padding < 0)
+					{
+						next_column_trim = -padding;
+						padding          = 0;
+					}
+				}
 
 				if (column->align == String_Table_Align_Mode_right)
 				{
