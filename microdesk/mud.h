@@ -105,6 +105,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef uint8_t Mud_Bool;
 
 // Define to disable nil nodes
@@ -119,7 +123,7 @@ typedef uint8_t Mud_Bool;
 
 // If you're only using MUD in one translation unit
 #if defined(MUD_STATIC)
-	#define MUD_API static
+	#define MUD_API static inline
 #else
 	#define MUD_API extern
 #endif
@@ -150,7 +154,8 @@ typedef uint8_t Mud_Bool;
 // Types
 //
 
-typedef enum Mud_Token
+typedef int Mud_Token;
+enum
 {
 	Mud_Token_eof             = -1,
 	Mud_Token_invalid         = -2,
@@ -158,7 +163,7 @@ typedef enum Mud_Token
 	Mud_Token_identifier      = -4,
 	Mud_Token_number          = -5,
 	Mud_Token_comment         = -6,
-} Mud_Token;
+};
 
 typedef uint32_t Mud_Node_Flags;
 enum
@@ -183,8 +188,8 @@ enum
 	Mud_Node_Flag_is_false             = (1u << 17),
 	Mud_Node_Flag_is_bool              = Mud_Node_Flag_is_true|Mud_Node_Flag_is_false,
 	Mud_Node_Flag_is_nil               = (1u << 18),
-	Mud_Node_Flag_invalid              = (1u << 31),
 };
+#define Mud_Node_Flag_invalid ((Mud_Node_Flags)0x80000000u)
 
 typedef enum Mud_Error
 {
@@ -294,6 +299,10 @@ MUD_API Mud_Bool mud_has_tag(Mud_Node *node, MUD_STRING name);
 MUD_API Mud_Node *mud_get_child(Mud_Node *node, MUD_STRING name);
 MUD_API Mud_Bool mud_has_child(Mud_Node *node, MUD_STRING name);
 
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
 #endif
 
 //
@@ -380,7 +389,7 @@ MUD_INLINE Mud_Bool mud_char_compatible_with_base(char c, Mud_Node_Flags flags)
 	Mud_Bool is_hex   = !!(flags & Mud_Node_Flag_number_is_hex);
 
 	Mud_Bool result = 0;
-	if (is_hex && ((c >= 'a' && c <= 'f') || c >= 'A' && c <= 'F'))
+	if (is_hex && ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
 	{
 		result = 1;
 	}
@@ -1106,7 +1115,9 @@ Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mu
 
 	mud_next_token(p);
 
-	Mud_Parse_Result result = {0};
+	Mud_Parse_Result result;
+	mud_memset(&result, 0, sizeof(result));
+
 	result.root = mud_allocate_node(p);
 	mud_set_name(result.root, MUD_TEXT("root"));
 
@@ -1136,12 +1147,16 @@ Mud_Node *mud_nil(void)
 #if defined(MUD_NIL_IS_NULL)
 	return NULL;
 #else
-	static Mud_Node _mud_nil = {
-		&_mud_nil,
-		&_mud_nil,
-		&_mud_nil,
-		&_mud_nil,
-	};
+	static Mud_Node _mud_nil;
+
+	if (_mud_nil.parent == 0)
+	{
+		_mud_nil.parent      = &_mud_nil;
+		_mud_nil.next        = &_mud_nil;
+		_mud_nil.first_child = &_mud_nil;
+		_mud_nil.first_tag   = &_mud_nil;
+	}
+
 	return &_mud_nil;
 #endif
 }

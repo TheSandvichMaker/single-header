@@ -32,10 +32,18 @@ extern "C" {
 #ifndef __cplusplus
 	#include <stdbool.h>
 	#ifndef alignof
-		#define alignof _Alignof
+		#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+			#define alignof _Alignof
+		#else
+			#define alignof(type) (sizeof(struct { char dc_align_c_; type dc_align_t_; }) - sizeof(type))
+		#endif
 	#endif
 
-	#define dc_thread_local __declspec(thread)
+	#if defined(_MSC_VER)
+		#define dc_thread_local __declspec(thread)
+	#else
+		#define dc_thread_local _Thread_local
+	#endif
 #endif
 
 typedef float    f32;
@@ -57,7 +65,6 @@ typedef u32      b32;
 typedef u64      b64;
 
 typedef intptr_t isz;
-typedef intptr_t isz;
 
 typedef size_t   usz;
 
@@ -69,16 +76,23 @@ typedef int32_t rune;
 
 // Decorators
 #if defined(DC_STATIC)
-#define fn      static
-#define global  static
+// static inline, not plain static: in a single-TU build most of the library goes unreferenced, and
+// plain static makes every one of those a -Wunused-function.
+#define fn         static inline
+#define global     static
 #else
-#define fn      extern
-#define global  extern
+#define fn         extern
+#define global     extern
 #endif
 
 #define local_persist static
 #define fn_local      static inline
+#define global_local  static
+#if defined(_MSC_VER)
 #define fn_export     extern __declspec(dllexport)
+#else
+#define fn_export     extern __attribute__((visibility("default")))
+#endif
 
 // Meta-macro hackery
 #define EXPAND(x) x
@@ -104,6 +118,7 @@ typedef int32_t rune;
 #define TB(x) ((isz)(x) << 40)
 
 #define round_up_pow2(x, y) ((y) > 0 ? (((x) + ((y) - 1)) & (-(isz)y)) : (x))
+#define round_down_pow2(x, y) ((y) > 0 ? ((x) & (-(isz)y)) : (x))
 
 fn_local u8 *align_pointer(void *ptr, isz align)
 {
@@ -170,8 +185,8 @@ typedef struct String_Pair
 
 typedef struct String16
 {
-	wchar_t *chars; // apologies for the misnomer
-	isz      count;
+	u16 *chars;
+	isz  count;
 } String16;
 
 #define String_Storage(size) struct { isz count; char chars[size]; }
@@ -217,11 +232,12 @@ fn_local String string_from_memory(Memory mem)
 }
 
 // Virtual Memory
+fn isz vm_page_size(void);
 fn Memory vm_reserve(void *address, isz size);
 fn bool vm_commit(void *address, isz size);
 fn Memory vm_alloc(void *address, isz size);
 fn void vm_decommit(void *address, isz size);
-fn void vm_release(void *address);
+fn void vm_release(Memory memory);
 
 // memcpy and memset type stuff
 #define copy_bytes(dst, src, len) (memmove(dst, src, (size_t)(len)), dst)
@@ -265,7 +281,7 @@ typedef struct Arena_Debug_State
 #define DC_ARENA_BREADCRUMB(...) 0
 #endif
 
-#define DC_ARENA_CALL(arena, func, ...) (DC_ARENA_BREADCRUMB(arena), func(arena, ## __VA_ARGS__))
+#define DC_ARENA_CALL(arena, func, ...) (DC_ARENA_BREADCRUMB(arena), func(arena, __VA_ARGS__))
 
 #define DC_ARENA_DEFAULT_CAPACITY          GB(8)
 #define DC_ARENA_COMMIT_CHUNK_SIZE         KB(256)
@@ -790,8 +806,12 @@ fn Memory os_read_entire_file(Arena *arena, String path);
 
 #if defined(_WIN32)
 #define debug_break() __debugbreak()
+#elif defined(__clang__)
+#define debug_break() __builtin_debugtrap()
+#elif defined(__GNUC__)
+#define debug_break() __builtin_trap()
 #else
-#error TODO: Other platforms
+#define debug_break() ((void)0)
 #endif
 
 fn bool os_is_debugger_attached(void);
@@ -813,10 +833,12 @@ typedef enum Log_Level
 fn void set_log_level_enabled(Log_Level level, bool enabled);
 fn String log_level_to_string(Log_Level level);
 
-fn void logf   (Log_Level level, String file, isz line, char const *fmt, ...);
-fn void logf_va(Log_Level level, String file, isz line, char const *fmt, va_list args);
+// Named dc_logf, not logf: with external linkage a plain `logf` both redeclares and collides at
+// link time with the C standard library's float logf(float).
+fn void dc_logf   (Log_Level level, String file, isz line, char const *fmt, ...);
+fn void dc_logf_va(Log_Level level, String file, isz line, char const *fmt, va_list args);
 
-#define LOG(level, fmt, ...) logf(Log_Level_##level, S(__FILE__), __LINE__, fmt, ##__VA_ARGS__)
+#define LOG(level, ...) dc_logf(Log_Level_##level, S(__FILE__), __LINE__, __VA_ARGS__)
 
 //
 // Testing
@@ -842,7 +864,7 @@ fn void test_run(Test_Context *t, String name, Test_Suite suite);
 #define TEST_RUN(t, suite) test_run(t, S(#suite), suite);
 fn void test_check(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, ...);
 fn void test_check_va(Test_Context *t, bool condition, String file, isz line, String expression, char const *fmt, va_list args);
-#define TEST_CHECK(t, cond, ...) test_check(t, cond, S(__FILE__), __LINE__, S(#cond), "" ##__VA_ARGS__)
+#define TEST_CHECK(t, cond, ...) test_check(t, cond, S(__FILE__), __LINE__, S(#cond), "" __VA_ARGS__)
 
 fn int test_report(Test_Context *t);
 
@@ -851,6 +873,10 @@ fn int test_report(Test_Context *t);
 //
 // Thread-Local Storage
 //
+
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 
 typedef struct TLS_Handle
 {
@@ -928,19 +954,54 @@ fn int entry_point(void);
 	#endif
 
 	#include <windows.h>
+#else
+	#include <errno.h>
+	#include <fcntl.h>
+	#include <pthread.h>
+	#include <sys/mman.h>
+	#include <sys/stat.h>
+	#include <unistd.h>
+
+	#if defined(__APPLE__)
+		#include <sys/sysctl.h>
+	#endif
+#endif
+
+#if !defined(DC_STATIC)
+DC_Context *_G;
 #endif
 
 // Virtual Memory
 
+isz vm_page_size(void)
+{
+	local_persist isz page_size = 0;
+
+	if (page_size == 0)
+	{
+#if defined(_WIN32)
+		SYSTEM_INFO info;
+		GetSystemInfo(&info);
+
+		page_size = (isz)info.dwPageSize;
+#else
+		page_size = (isz)sysconf(_SC_PAGESIZE);
+#endif
+	}
+
+	return page_size;
+}
+
 #if defined(_WIN32)
 Memory vm_reserve(void *address, isz size)
 {
-	Memory result = {0};
+	Memory result;
+	zero_struct(&result);
 	result.bytes = VirtualAlloc(address, size, MEM_RESERVE, PAGE_NOACCESS);
 
 	if (result.bytes)
 	{
-		result.size = (size + 4095) / 4096;
+		result.size = size;
 	}
 
     return result;
@@ -954,12 +1015,13 @@ bool vm_commit(void *address, isz size)
 
 Memory vm_alloc(void *address, isz size)
 {
-	Memory result = {0};
+	Memory result;
+	zero_struct(&result);
     result.bytes = VirtualAlloc(address, size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
 
 	if (result.bytes)
 	{
-		result.size = (size + 4095) / 4096;
+		result.size = size;
 	}
 
     return result;
@@ -970,12 +1032,69 @@ void vm_decommit(void *address, isz size)
     VirtualFree(address, size, MEM_DECOMMIT);
 }
 
-void vm_release(void *address)
+void vm_release(Memory memory)
 {
-    VirtualFree(address, 0, MEM_RELEASE);
+    VirtualFree(memory.bytes, 0, MEM_RELEASE);
 }
 #else
-#error TODO: Other platforms
+
+fn_local Memory vm_map(void *address, isz size, int protection)
+{
+	Memory result;
+	zero_struct(&result);
+
+	void *base = mmap(address, (size_t)size, protection, MAP_PRIVATE|MAP_ANON, -1, 0);
+
+	if (base != MAP_FAILED)
+	{
+		result.bytes = base;
+		result.size  = size;
+	}
+
+	return result;
+}
+
+Memory vm_reserve(void *address, isz size)
+{
+	return vm_map(address, size, PROT_NONE);
+}
+
+bool vm_commit(void *address, isz size)
+{
+	isz page_size = vm_page_size();
+
+	u8 *start = (u8 *)round_down_pow2((uintptr_t)address, page_size);
+	u8 *end   = align_pointer((u8 *)address + size, page_size);
+
+	return mprotect(start, (size_t)(end - start), PROT_READ|PROT_WRITE) == 0;
+}
+
+Memory vm_alloc(void *address, isz size)
+{
+	return vm_map(address, size, PROT_READ|PROT_WRITE);
+}
+
+void vm_decommit(void *address, isz size)
+{
+	isz page_size = vm_page_size();
+
+	// rounded inward, so a partially covered page keeps whatever still lives on it
+	u8 *start = align_pointer(address, page_size);
+	u8 *end   = (u8 *)round_down_pow2((uintptr_t)address + (uintptr_t)size, page_size);
+
+	if (end > start)
+	{
+		mmap(start, (size_t)(end - start), PROT_NONE, MAP_PRIVATE|MAP_ANON|MAP_FIXED, -1, 0);
+	}
+}
+
+void vm_release(Memory memory)
+{
+	// munmap rounds the length up to a whole page itself, so memory.size can be the size that was
+	// originally requested rather than the mapping's rounded-up size.
+	munmap(memory.bytes, (size_t)memory.size);
+}
+
 #endif
 
 // Arena
@@ -1026,7 +1145,7 @@ void *arena_alloc_ex_(Arena *arena, isz size, isz align, bool zero_memory, bool 
 #if DC_ARENA_DEBUG
 		if (!do_not_allocate_debug_node)
 		{
-			Arena_Debug_Node *debug = arena_alloc_ex_(arena, dc_sizeof(Arena_Debug_Node), dc_alignof(Arena_Debug_Node), false, true);
+			Arena_Debug_Node *debug = (Arena_Debug_Node *)arena_alloc_ex_(arena, dc_sizeof(Arena_Debug_Node), dc_alignof(Arena_Debug_Node), false, true);
 			debug->next             = NULL;
 			debug->prev             = NULL;
 			debug->tag              = arena->debug.current_tag;
@@ -1101,7 +1220,10 @@ void arena_destroy(Arena *arena)
 
 void arena_destroy_nonrecursive(Arena *arena)
 {
-	vm_release(arena);
+	// the reservation starts at the arena header, so this is desc->capacity as passed to
+	// arena_make_ex -- not arena_capacity(), which excludes that header.
+	Memory reservation = { arena, arena->end - (u8 *)arena };
+	vm_release(reservation);
 }
 
 Arena *arena_bootstrap_(String name, isz size, isz align, isz offset_to_member, Arena **typecheck)
@@ -1114,7 +1236,7 @@ Arena *arena_bootstrap_(String name, isz size, isz align, isz offset_to_member, 
 	// Copying the arena pointer, not the arena
 	copy_bytes((u8 *)result + offset_to_member, &arena, sizeof(Arena *));
 
-	return result;
+	return (Arena *)result;
 }
 
 isz arena_capacity(Arena const *arena)
@@ -1247,7 +1369,7 @@ void arena_scope_abandon(Arena *arena)
 {
 	if (dc_always(arena->current_scope != NULL))
 	{
-		sll_pop(arena->current_scope);
+		(void)sll_pop(arena->current_scope);
 		// And then do nothing with it :)
 	}
 }
@@ -1375,7 +1497,7 @@ int digit_from_char(char c)
 	}
 }
 
-global i8 digit_from_char_table[] = {
+global_local i8 digit_from_char_table[] = {
 	// [null-/]
 	-1, -1, -1, -1, -1, -1, -1, -1, -1,
 	-1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -1403,7 +1525,8 @@ global i8 digit_from_char_table[] = {
 
 i64 digit_from_char_ex(char c, i64 base)
 {
-	i32 result = digit_from_char_table[c];
+	u8  index  = (u8)c;
+	i32 result = (index < ArrayCount(digit_from_char_table)) ? digit_from_char_table[index] : -1;
 
 	if (result >= base)
 	{
@@ -1574,7 +1697,7 @@ rune utf8_decode(char const **cursor, isz *remaining)
 	*cursor += continuation_count + 1;
 	*remaining -= continuation_count + 1;
 
-	if (code_point < min_code_point[continuation_count] || code_point > 0x10FFFFu || (code_point >= 0xD800u && code_point <= 0xDFFFu))
+	if (code_point < min_code_point[continuation_count] || code_point > 0x10FFFF || (code_point >= 0xD800 && code_point <= 0xDFFF))
 	{
 		return UTF_REPLACEMENT_CHAR;
 	}
@@ -1587,13 +1710,13 @@ rune utf16_decode(u16 const **cursor, isz *remaining)
 	u16 const *s = *cursor;
 	rune unit = s[0];
 
-	if (unit >= 0xD800u && unit <= 0xDBFFu)
+	if (unit >= 0xD800 && unit <= 0xDBFF)
 	{
 		if (*remaining >= 2)
 		{
 			rune low = s[1];
 
-			if (low >= 0xDC00u && low <= 0xDFFFu)
+			if (low >= 0xDC00 && low <= 0xDFFF)
 			{
 				*cursor += 2;
 				*remaining -= 2;
@@ -1609,7 +1732,7 @@ rune utf16_decode(u16 const **cursor, isz *remaining)
 	*cursor += 1;
 	*remaining -= 1;
 
-	if (unit >= 0xDC00u && unit <= 0xDFFFu)
+	if (unit >= 0xDC00 && unit <= 0xDFFF)
 	{
 		return UTF_REPLACEMENT_CHAR; // Unpaired low surrogate.
 	}
@@ -1631,7 +1754,7 @@ isz utf16_from_utf8_into_buffer(u16 *dst, isz dst_capacity, char const *src, isz
 		u16 units[2];
 		isz count;
 
-		if (code_point < 0x10000u)
+		if (code_point < 0x10000)
 		{
 			units[0] = (u16)code_point;
 			count = 1;
@@ -1688,18 +1811,18 @@ isz utf8_from_utf16_into_buffer(char *dst, isz dst_capacity, u16 const *src, isz
 		isz count;
 		isz i;
 
-		if (code_point < 0x80u)
+		if (code_point < 0x80)
 		{
 			bytes[0] = (char)code_point;
 			count = 1;
 		}
-		else if (code_point < 0x800u)
+		else if (code_point < 0x800)
 		{
 			bytes[0] = (char)(0xC0u | (code_point >> 6));
 			bytes[1] = (char)(0x80u | (code_point & 0x3Fu));
 			count = 2;
 		}
-		else if (code_point < 0x10000u)
+		else if (code_point < 0x10000)
 		{
 			bytes[0] = (char)(0xE0u | (code_point >> 12));
 			bytes[1] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
@@ -1887,8 +2010,8 @@ void string_to_upper_in_place(String string)
 #endif
 
 #ifdef STB_SPRINTF_STATIC
-#define STBSP__PUBLICDEC static STBSP__ASAN
-#define STBSP__PUBLICDEF static STBSP__ASAN
+#define STBSP__PUBLICDEC static inline STBSP__ASAN
+#define STBSP__PUBLICDEF static inline STBSP__ASAN
 #else
 #ifdef __cplusplus
 #define STBSP__PUBLICDEC extern "C" STBSP__ASAN
@@ -2251,7 +2374,8 @@ isz string_find_substring_backwards(String text, String pattern, String_Match_Fl
 
 fn String string_find_enclosed_group(String string, char open, char close, bool recurse)
 {
-	String result = {0};
+	String result;
+	zero_struct(&result);
 
 	isz i = string_find_first_char(string, open, 0);
 	if (i >= string.count - 1) return result;
@@ -2635,7 +2759,8 @@ String_Pair string_split_word(String string)
 		return result;
 	}
 
-	String_Pair result = {0};
+	String_Pair result;
+	zero_struct(&result);
 	result.r = string;
 	return result;
 }
@@ -2664,7 +2789,8 @@ String_Pair string_split_identifier(String string)
 		return result;
 	}
 
-	String_Pair result = {0};
+	String_Pair result;
+	zero_struct(&result);
 	result.r = string;
 	return result;
 }
@@ -2686,7 +2812,8 @@ String string_iter_line(String *iter)
 
 Parse_Number_Result string_parse_u64(String string)
 {
-	Parse_Number_Result result = {0};
+	Parse_Number_Result result;
+	zero_struct(&result);
 
 	char *at  = string.chars;
 	char *end = string.chars + string.count;
@@ -2898,7 +3025,8 @@ Parse_Number_Result string_parse_f64(String string)
 	char *end = NULL;
 	f64 value = strtod(buffer, &end);
 
-	Parse_Number_Result result = {0};
+	Parse_Number_Result result;
+	zero_struct(&result);
 	result.is_valid  = end != buffer;
 	result.value_f64 = value;
 
@@ -4020,7 +4148,7 @@ bool os_write_entire_file(String path, Memory memory)
 	Arena_ScopedTemp {
 		String16 path16 = utf16_from_utf8(temp, path);
 
-		HANDLE handle = CreateFileW(path16.chars, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		HANDLE handle = CreateFileW((WCHAR *)path16.chars, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
 		if (handle != INVALID_HANDLE_VALUE)
 		{
@@ -4040,12 +4168,13 @@ bool os_write_entire_file(String path, Memory memory)
 
 Memory os_read_entire_file(Arena *arena, String path)
 {
-	Memory result = {0};
+	Memory result;
+	zero_struct(&result);
 
 	Arena_ScopedTemp {
 		String16 path16 = utf16_from_utf8(temp, path);
 
-		HANDLE handle = CreateFileW(path16.chars, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		HANDLE handle = CreateFileW((WCHAR *)path16.chars, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (handle != INVALID_HANDLE_VALUE)
 		{
 			DWORD file_size_high;
@@ -4080,7 +4209,103 @@ Memory os_read_entire_file(Arena *arena, String path)
 }
 
 #else // defined(_WIN32)
-#error TODO: Other platforms
+
+bool os_write_entire_file(String path, Memory memory)
+{
+	bool result = false;
+
+	Arena_ScopedTemp {
+		String path_z = string_null_terminate(temp, path);
+
+		int fd = open(path_z.chars, O_WRONLY|O_CREAT|O_TRUNC, 0666);
+
+		if (fd >= 0)
+		{
+			result = true;
+
+			u8 *at        = (u8 *)memory.bytes;
+			isz remaining = memory.size;
+
+			while (remaining > 0)
+			{
+				isz written = write(fd, at, (size_t)remaining);
+
+				if (written < 0)
+				{
+					if (errno == EINTR) continue;
+
+					result = false;
+					break;
+				}
+
+				at        += written;
+				remaining -= written;
+			}
+
+			close(fd);
+		}
+	}
+
+	return result;
+}
+
+Memory os_read_entire_file(Arena *arena, String path)
+{
+	Memory result;
+	zero_struct(&result);
+
+	Arena_ScopedTemp {
+		String path_z = string_null_terminate(temp, path);
+
+		int fd = open(path_z.chars, O_RDONLY);
+
+		if (fd >= 0)
+		{
+			struct stat st;
+
+			if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0)
+			{
+				isz   file_size = (isz)st.st_size;
+				char *buffer    = (char *)arena_alloc_nozero(arena, file_size + 1, 16);
+
+				char *at        = buffer;
+				isz   remaining = file_size;
+				bool  ok        = true;
+
+				while (remaining > 0)
+				{
+					isz bytes_read = read(fd, at, (size_t)remaining);
+
+					if (bytes_read < 0)
+					{
+						if (errno == EINTR) continue;
+
+						ok = false;
+						break;
+					}
+
+					if (bytes_read == 0) break; // truncated under us
+
+					at        += bytes_read;
+					remaining -= bytes_read;
+				}
+
+				if (ok)
+				{
+					result.size  = at - buffer;
+					result.bytes = buffer;
+
+					buffer[result.size] = 0;
+				}
+			}
+
+			close(fd);
+		}
+	}
+
+	return result;
+}
+
 #endif
 
 //
@@ -4091,8 +4316,48 @@ bool os_is_debugger_attached(void)
 {
 #if defined(_WIN32)
 	return IsDebuggerPresent();
+#elif defined(__APPLE__)
+	// sysctl is the documented way to ask this of yourself on Darwin; there is no ptrace query.
+	struct kinfo_proc info;
+	size_t            info_size = sizeof(info);
+
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+
+	zero_struct(&info);
+
+	if (sysctl(mib, 4, &info, &info_size, NULL, 0) != 0)
+	{
+		return false;
+	}
+
+	return (info.kp_proc.p_flag & P_TRACED) != 0;
+#elif defined(__linux__)
+	bool result = false;
+
+	int fd = open("/proc/self/status", O_RDONLY);
+
+	if (fd >= 0)
+	{
+		char buffer[4096];
+		isz  count = read(fd, buffer, sizeof(buffer) - 1);
+
+		if (count > 0)
+		{
+			buffer[count] = 0;
+
+			char *tracer = strstr(buffer, "TracerPid:");
+			if (tracer)
+			{
+				result = (atoi(tracer + sizeof("TracerPid:") - 1) != 0);
+			}
+		}
+
+		close(fd);
+	}
+
+	return result;
 #else
-#error TODO: Other platforms
+	return false;
 #endif
 }
 
@@ -4114,23 +4379,24 @@ String log_level_to_string(Log_Level level)
 		case Log_Level_warning: return S("warning");
 		case Log_Level_error:   return S("error");
 		case Log_Level_fatal:   return S("fatal");
+		case Log_Level_COUNT:   break;
 	}
 	return S("<invalid>");
 }
 
-void logf(Log_Level level, String file, isz line, char const *fmt, ...)
+void dc_logf(Log_Level level, String file, isz line, char const *fmt, ...)
 {
 	if (!_G->log_level_enabled[level]) return;
 
 	va_list args;
 	va_start(args, fmt);
 
-	logf_va(level, file, line, fmt, args);
+	dc_logf_va(level, file, line, fmt, args);
 
 	va_end(args);
 }
 
-void logf_va(Log_Level level, String file, isz line, char const *fmt, va_list args)
+void dc_logf_va(Log_Level level, String file, isz line, char const *fmt, va_list args)
 {
 	if (!_G->log_level_enabled[level]) return;
 
@@ -4254,11 +4520,11 @@ void test_check_va(Test_Context *t, bool condition, String file, isz line, Strin
 			String message = string_format_va(temp, fmt, args);
 			if (!string_empty(message))
 			{
-				logf(Log_Level_error, file, line, "TEST_EXPECT(%.*s) failed: %.*s", Sx(expression), Sx(message));
+				dc_logf(Log_Level_error, file, line, "TEST_EXPECT(%.*s) failed: %.*s", Sx(expression), Sx(message));
 			}
 			else
 			{
-				logf(Log_Level_error, file, line, "TEST_EXPECT(%.*s) failed!", Sx(expression));
+				dc_logf(Log_Level_error, file, line, "TEST_EXPECT(%.*s) failed!", Sx(expression));
 			}
 		}
 	}
@@ -4284,7 +4550,8 @@ TLS_Handle tls_allocate(void)
 	};
 	result.is_allocated = result.handle != TLS_OUT_OF_INDEXES;
 #else
-	TLS_Handle result = {0};
+	TLS_Handle result;
+	zero_struct(&result);
 	result.is_allocated = (pthread_key_create(&result.handle, NULL) == 0);
 #endif
 	return result;
@@ -4361,7 +4628,7 @@ void dc_set_context(DC_Context *context)
 
 Thread_Context *get_tctx(void)
 {
-	Thread_Context *result = tls_get(_G->tctx);
+	Thread_Context *result = (Thread_Context *)tls_get(_G->tctx);
 
 	if (result == NULL)
 	{
