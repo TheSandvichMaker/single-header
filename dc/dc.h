@@ -1049,6 +1049,7 @@ typedef u8 Job_Flags;
 typedef enum Job_Flags_Enum
 {
 	Job_Flag_run_immediately = (1u << 0),
+	Job_Flag__allocated      = (1u << 7),
 } Job_Flags_Enum;
 
 typedef struct Job_Execution_Context
@@ -1068,13 +1069,13 @@ typedef void (*Job_Proc)(Job *job, Job_Execution_Context *context);
 
 typedef struct Job
 {
-	Job_Proc       proc;               // 8
-	Job_Index      parent;             // 10
-	DC_ATOMIC(i16) unfinished_jobs;    // 12
-	Job_Index      job_index;          // 14
-	Job_Flags      flags;              // 15
-	u8             continuation_count; // 16
-	Job_Index      continuations[8];   // 32
+	Job_Proc             proc;               // 8
+	Job_Index            parent;             // 10
+	DC_ATOMIC(i16)       unfinished_jobs;    // 12
+	Job_Index            job_index;          // 14
+	DC_ATOMIC(Job_Flags) flags;              // 15
+	u8                   continuation_count; // 16
+	Job_Index            continuations[8];   // 32
 	union
 	{
 		char  user_data[DC_MAXIMUM_INLINE_JOB_DATA_SIZE]; // 64
@@ -5151,6 +5152,8 @@ void thread_start(Thread *thread, Thread_Proc proc, void *user_ptr0)
 // Job System
 //
 
+// inspired by https://blog.molecular-matters.com/2015/08/24/job-system-2-0-lock-free-work-stealing-part-1-basics/
+
 Job_Index encode_job_index(u16 thread_index, u16 job_index)
 {
 	dc_assert_debug(job_index < (1u << DC_JOB_INDEX_JOB_BITS));
@@ -5177,6 +5180,7 @@ void copy_job_data(Job *job, void const *data, isz data_size)
 	copy_bytes(job->user_data, data, data_size);
 }
 
+// Lock-free work stealing queue
 // https://inria.hal.science/hal-00802885/document
 
 void work_stealing_queue_init(Work_Stealing_Queue *q, u16 *indices, isz size)
@@ -5267,6 +5271,11 @@ fn_local Job *allocate_job(Job_System_Worker_Thread *thread)
 	Job *job = &thread->job_allocator[index];
 	job->job_index = encode_job_index(thread->thread_index, index);
 
+	u8 flags = atomic_fetch_or_explicit(&job->flags, Job_Flag__allocated, memory_order_relaxed);
+
+	// If the allocated flag is set, we overflowed the job allocator
+	dc_assert((flags & Job_Flag__allocated) == 0);
+
 	return job;
 }
 
@@ -5298,6 +5307,11 @@ fn_local void finish_job(Job_System *job_system, Job *job)
 	i16 unfinished_jobs = atomic_fetch_sub_explicit(&job->unfinished_jobs, 1, memory_order_relaxed) - 1;
 	if (unfinished_jobs == 0)
 	{
+		u8 flags = atomic_fetch_and_explicit(&job->flags, (u8)~Job_Flag__allocated, memory_order_relaxed);
+
+		// If the allocated flag was not set we must've had some kind of corruption
+		dc_assert((flags & Job_Flag__allocated) != 0);
+
 		if (job->parent != 0xFFFFu)
 		{
 			Job *parent = job_from_index(job->parent);
@@ -5454,7 +5468,6 @@ Job *job_create_with_data(Job_Proc proc, Job *parent, void const *data, isz data
 	Job *job = allocate_job(thread);
 	job->proc               = proc ? proc : job_empty;
 	job->parent             = parent ? parent->job_index : 0xFFFFu;
-	job->flags              = 0;
 	job->unfinished_jobs    = 1;
 	job->continuation_count = 0;
 
