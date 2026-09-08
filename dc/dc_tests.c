@@ -81,12 +81,47 @@ void test_unicode_conversion(Test_Context *t)
 	}
 }
 
+fn_local void test_job(Job *job, Job_Execution_Context *ctx)
+{
+	int *values = (int *)job->user_ptrs[0];
+
+	values[ctx->worker_thread_index] += 1;
+}
+
+void test_job_system(Test_Context *t)
+{
+	(void)t;
+
+	int values[8] = {0};
+
+	Job *root = job_create(NULL, NULL);
+	
+	for (int i = 0; i < 1024; i += 1)
+	{
+		Job *job = job_create(test_job, root);
+		job->user_ptrs[0] = values;
+
+		job_run(job);
+	}
+
+	job_run(root);
+	job_wait(root);
+
+	for (int i = 0; i < 8; i += 1)
+	{
+		fprintf(stderr, "values[%d] = %d\n", i, values[i]);
+	}
+}
+
 int entry_point(void)
 {
+	job_system_init(8);
+
 	Test_Context *t = &(Test_Context){0};
 
 	TEST_RUN(t, test_integer_parsing);
 	TEST_RUN(t, test_unicode_conversion);
+	TEST_RUN(t, test_job_system);
 
 	return test_report(t);
 }

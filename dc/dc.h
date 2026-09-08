@@ -24,6 +24,19 @@ extern "C" {
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
+// TODO(daniel): Hand-roll atomics to avoid C11 dependency?
+#include <stdatomic.h>
+
+#ifdef __cplusplus
+#define DC_ATOMIC(x) std::atomic<x>
+#else
+#define DC_ATOMIC(x) _Atomic(x)
+#endif
+
+#if _10X_EDITOR
+#undef DC_ATOMIC
+#define DC_ATOMIC(x) x
+#endif
 
 //
 // Typedefs
@@ -33,10 +46,14 @@ extern "C" {
 	#include <stdbool.h>
 	#ifndef alignof
 		#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-			#define alignof _Alignof
+			#define alignof(x) _Alignof(x)
 		#else
 			#define alignof(type) (sizeof(struct { char dc_align_c_; type dc_align_t_; }) - sizeof(type))
 		#endif
+	#endif
+
+	#ifndef alignas
+		#define alignas(x) _Alignas(x)
 	#endif
 
 	#if defined(_MSC_VER)
@@ -76,8 +93,6 @@ typedef int32_t rune;
 
 // Decorators
 #if defined(DC_STATIC)
-// static inline, not plain static: in a single-TU build most of the library goes unreferenced, and
-// plain static makes every one of those a -Wunused-function.
 #define fn         static inline
 #define global     static
 #else
@@ -107,6 +122,7 @@ typedef int32_t rune;
 #define PAD(n) char PASTE(pad__, __LINE__)[n]
 
 #define ArrayCount(x) ((isz)(sizeof(x) / sizeof((x)[0])))
+#define dc_countof(x) ArrayCount(x)
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -161,6 +177,81 @@ fn_local u8 *align_pointer(void *ptr, isz align)
 #define DC_DEFER_LOOP(begin, end) for (i32 PASTE(_i_, __LINE__) = (begin, 0); !PASTE(_i_, __LINE__); PASTE(_i_, __LINE__) += (end, 1))
 
 //
+// Math Types
+//
+
+typedef union V2
+{
+	struct { f32 x, y; };
+	f32 e[2];
+} V2;
+
+typedef union V3
+{
+	struct { f32 x, y, z; };
+	f32 e[3];
+} V3;
+
+typedef union V4
+{
+	struct { f32 x, y, z, w; };
+	f32 e[4];
+} V4;
+
+// Inline Math
+
+fn_local f32 v2_dot(V2 a, V2 b)
+{
+	return a.x * b.x + a.y * b.y;
+}
+
+fn_local f32 v3_dot(V3 a, V3 b)
+{
+	return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+//
+// Random Series
+//
+
+typedef struct Random_Series
+{
+	u32 state;
+} Random_Series;
+
+fn Random_Series random_series_make(u32 seed);
+
+fn u32 random_u32(Random_Series *r);
+
+// returns random [0, 1) float
+fn f32 random_unilateral    (Random_Series *r);
+fn f64 random_unilateral_f64(Random_Series *r);
+
+// returns random [-1, 1) f32
+fn f32 random_bilateral(Random_Series *r);
+
+// returns random number in range [0, s)
+fn u32 random_choice(Random_Series *r, u32 s);
+
+// returns random number in range [1, sides]
+fn u32 dice_roll(Random_Series *r, u32 sides);
+
+// returns random number in range [min, max)
+fn u32 random_range_u32(Random_Series *r, u32 min, u32 max);
+fn i32 random_range_i32(Random_Series *r, i32 min, i32 max);
+
+// returns random f32 in range [min, max)
+fn f32 random_range_f32(Random_Series *r, f32 min, f32 max);
+fn f64 random_range_f64(Random_Series *r, f64 min, f64 max);
+
+fn V2 random_unilateral2   (Random_Series *r);
+fn V3 random_unilateral3   (Random_Series *r);
+fn V2 random_in_unit_square(Random_Series *r);
+fn V3 random_in_unit_cube  (Random_Series *r);
+fn V2 random_in_unit_disk  (Random_Series *r);
+fn V3 random_in_unit_sphere(Random_Series *r);
+
+//
 //
 //
 
@@ -183,10 +274,16 @@ typedef struct String_Pair
 	};
 } String_Pair;
 
+#if defined(_WIN32)
+typedef wchar_t char16; // So that debuggers visualize it as a string
+#else
+typedef u16 char16;
+#endif
+
 typedef struct String16
 {
-	u16 *chars;
-	isz  count;
+	char16 *chars;
+	isz     count;
 } String16;
 
 #define String_Storage(size) struct { isz count; char chars[size]; }
@@ -202,6 +299,7 @@ typedef struct String16
 #include <assert.h>
 
 #define dc_assert(...) assert(__VA_ARGS__)
+#define dc_assert_debug(...) assert(__VA_ARGS__)
 #define dc_always(x) (assert(x), x)
 #define dc_never(x) (assert(!(x)), x)
 
@@ -388,6 +486,7 @@ fn bool arena_verify(Arena *arena);
 fn void arena_scope_begin(Arena *arena);
 fn void arena_scope_end(Arena *arena);
 fn void arena_scope_abandon(Arena *arena);
+fn void arena_instantiate_thread_temp(void);
 fn Arena *arena_get_temp(void);
 fn void arena_release_temp(Arena *temp);
 fn Arena *arena_get_temp_unscoped(void); // returns the same arena as arena_get_temp most recently returned for this thread, so you are always in the innermost scope
@@ -407,7 +506,7 @@ fn void arena_reset_temp_arenas(void);
 // Usage: printf("%.*s", Sx(string));
 #define Sx(str) (int)(str).count, (str).chars
 
-#define S16(text) DC_COMPOUND_LIT(String16) { (u16 *)(L"" text), sizeof(L"" text) / sizeof(u16) - 1 }
+#define S16(text) DC_COMPOUND_LIT(String16) { (char16 *)(L"" text), sizeof(L"" text) / sizeof(char16) - 1 }
 
 // Single Character
 fn bool char_is_whitespace(char c);
@@ -423,12 +522,12 @@ fn i64 digit_from_char_ex(char c, i64 base);
 
 fn bool string_empty(String str);
 fn isz cstring_count(char const *str);
-fn isz cstring16_count(u16 const *str);
+fn isz cstring16_count(char16 const *str);
 fn String string(char const *chars, isz count);
-fn String16 string16(u16 const *chars, isz count);
+fn String16 string16(char16 const *chars, isz count);
 fn isz string_count_newlines(String string);
 fn String string_from_cstring(char const *cstr);
-fn String16 string16_from_cstring(u16 const *cstr);
+fn String16 string16_from_cstring(char16 const *cstr);
 fn String string_from_pointers(char const *start, char const *end);
 fn String substring(String str, isz first, isz count);
 fn String substring_range(String str, isz first, isz one_past_last);
@@ -441,9 +540,9 @@ fn String string_copy(Arena *arena, String string);
 
 // Unicode
 fn rune utf8_decode(char const **cursor, isz *remaining);
-fn rune utf16_decode(u16 const **cursor, isz *remaining);
-fn isz utf16_from_utf8_into_buffer(u16 *dst, isz dst_capacity, char const *src, isz src_length);
-fn isz utf8_from_utf16_into_buffer(char *dst, isz dst_capacity, u16 const *src, isz src_length);
+fn rune utf16_decode(char16 const **cursor, isz *remaining);
+fn isz utf16_from_utf8_into_buffer(char16 *dst, isz dst_capacity, char const *src, isz src_length);
+fn isz utf8_from_utf16_into_buffer(char *dst, isz dst_capacity, char16 const *src, isz src_length);
 fn String16 utf16_from_utf8(Arena *arena, String utf8);
 fn String utf8_from_utf16(Arena *arena, String16 utf16);
 
@@ -895,6 +994,154 @@ fn void      *tls_get     (TLS_Handle handle);
 fn void       tls_set     (TLS_Handle handle, void *value);
 
 //
+// Threading
+//
+
+// Sync Primitives
+
+typedef DC_ATOMIC(u32) Futex;
+
+fn bool futex_wait(Futex *futex, u32 expected_value);
+fn bool futex_wait_with_timeout(Futex *futex, u32 expected_value, u64 timeout_ns);
+fn bool futex_signal(Futex *futex);
+fn bool futex_broadcast(Futex *futex);
+
+#if defined(_M_AMD64) || defined(__x86_64__) || defined(__i386__)
+#define os_processor_yield() _mm_pause()
+#elif defined(__arm64__) || defined(__aarch64__)
+#define os_processor_yield() __asm__ volatile("yield")
+#endif
+
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+	#define DC_CACHE_LINE_SIZE 128
+#else
+	#define DC_CACHE_LINE_SIZE 64
+#endif
+
+#define DC_THREAD_INLINE_DATA_SIZE 64
+
+typedef struct Thread Thread;
+typedef void (*Thread_Proc)(Thread *thread);
+
+typedef struct Thread
+{
+	Thread_Proc proc;
+	u32         id;
+	union
+	{
+		char  user_data[DC_THREAD_INLINE_DATA_SIZE];
+		void *user_ptrs[DC_THREAD_INLINE_DATA_SIZE / sizeof(void *)];
+	};
+	void *os_handle;
+} Thread;
+
+fn void thread_start                 (Thread *thread, Thread_Proc proc, void *user_ptr0);
+fn void thread_start_with_inline_data(Thread *thread, Thread_Proc proc, void const *data, isz data_size);
+
+//
+// Job System
+//
+
+typedef u16 Job_Index;
+#define DC_NULL_JOB_INDEX 0xFFFFu
+
+typedef u8 Job_Flags;
+typedef enum Job_Flags_Enum
+{
+	Job_Flag_run_immediately = (1u << 0),
+} Job_Flags_Enum;
+
+typedef struct Job_Execution_Context
+{
+	isz worker_thread_index;
+} Job_Execution_Context;
+
+typedef struct Job Job;
+typedef void (*Job_Proc)(Job *job, Job_Execution_Context *context);
+
+#define DC_JOB_INDEX_THREAD_BITS 4
+#define DC_JOB_INDEX_JOB_BITS (16 - DC_JOB_INDEX_THREAD_BITS)
+
+#define DC_MAXIMUM_INLINE_JOB_DATA_SIZE 32
+#define DC_MAX_WORKER_THREADS (1u << DC_JOB_INDEX_THREAD_BITS)
+#define DC_MAX_JOBS_PER_QUEUE (1u << DC_JOB_INDEX_JOB_BITS)
+
+typedef struct Job
+{
+	Job_Proc       proc;               // 8
+	Job_Index      parent;             // 10
+	DC_ATOMIC(i16) unfinished_jobs;    // 12
+	Job_Index      job_index;          // 14
+	Job_Flags      flags;              // 15
+	u8             continuation_count; // 16
+	Job_Index      continuations[8];   // 32
+	union
+	{
+		char  user_data[DC_MAXIMUM_INLINE_JOB_DATA_SIZE]; // 64
+		void *user_ptrs[DC_MAXIMUM_INLINE_JOB_DATA_SIZE / sizeof(void *)];
+	};
+} Job;
+
+fn Job_Index encode_job_index(u16 thread_index, u16 job_index);
+fn void decode_job_index(Job_Index in_job_index, u16 *out_thread_index, u16 *out_job_index);
+
+fn void job_add_continuation(Job *ancestor, Job *continuation);
+fn void copy_job_data(Job *job, void const *data, isz data_size);
+
+typedef struct Work_Stealing_Queue
+{
+	alignas(DC_CACHE_LINE_SIZE) DC_ATOMIC(isz) top;    PAD(DC_CACHE_LINE_SIZE - sizeof(isz));
+	alignas(DC_CACHE_LINE_SIZE) DC_ATOMIC(isz) bottom; PAD(DC_CACHE_LINE_SIZE - sizeof(isz));
+	alignas(DC_CACHE_LINE_SIZE)
+	isz  size; // must be pow2
+	isz  mask; // size - 1
+	DC_ATOMIC(u16) *indices;
+} Work_Stealing_Queue;
+
+fn void work_stealing_queue_init (Work_Stealing_Queue *q, u16 *indices, isz size /* must be pow2 */);
+fn bool work_stealing_queue_push (Work_Stealing_Queue *q, u16 index);
+fn u16  work_stealing_queue_pop  (Work_Stealing_Queue *q);
+fn u16  work_stealing_queue_steal(Work_Stealing_Queue *q);
+
+typedef struct Job_System_Worker_Thread
+{
+	struct Job_System *job_system;
+
+	Thread thread;
+
+	u16           thread_index;
+	Random_Series random;
+
+	alignas(DC_CACHE_LINE_SIZE) DC_ATOMIC(bool) running; PAD(DC_CACHE_LINE_SIZE - sizeof(bool));
+
+	alignas(DC_CACHE_LINE_SIZE) Work_Stealing_Queue queue;
+	alignas(DC_CACHE_LINE_SIZE) u16 queue_indices[DC_MAX_JOBS_PER_QUEUE];
+	alignas(DC_CACHE_LINE_SIZE) Job job_allocator[DC_MAX_JOBS_PER_QUEUE];
+	alignas(DC_CACHE_LINE_SIZE) DC_ATOMIC(u64) next_job;
+} Job_System_Worker_Thread;
+
+typedef struct Job_System
+{
+	alignas(DC_CACHE_LINE_SIZE) Futex jobs_in_flight;
+	alignas(DC_CACHE_LINE_SIZE)
+
+	TLS_Handle this_thread;
+
+	isz thread_count;
+	Job_System_Worker_Thread *threads[DC_MAX_WORKER_THREADS];
+} Job_System;
+
+fn void job_system_init(isz worker_thread_count);
+fn Job *job_from_index(Job_Index index);
+fn Job *job_create(Job_Proc proc, Job *parent);
+fn Job *job_create_with_data(Job_Proc proc, Job *parent, void const *data, isz data_size);
+fn void job_run(Job *job);
+fn isz  job_unfinished_count(Job *job);
+fn bool job_has_completed(Job *job);
+fn void job_wait(Job *job);
+fn void job_wait_all(void);
+
+//
 // Global context (used to allow global library state to survive hot reloading)
 //
 
@@ -919,6 +1166,8 @@ typedef struct DC_Context
 	TLS_Handle tctx;
 
 	bool log_level_enabled[Log_Level_COUNT];
+
+	Job_System *job_system;
 } DC_Context;
 
 global DC_Context *_G;
@@ -971,7 +1220,189 @@ fn int entry_point(void);
 DC_Context *_G;
 #endif
 
+//
+// Math
+//
+
+//
+// Random Series
+// TODO(daniel): Better random than xorshift?
+//
+
+Random_Series random_series_make(u32 seed)
+{
+	if (seed == 0) seed = 1;
+
+	Random_Series result = {0};
+	result.state = seed;
+	return result;
+}
+
+u32 random_u32(Random_Series *r)
+{
+	u32 x = r->state;
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	r->state = x;
+	return r->state;
+}
+
+u64 random_u64(Random_Series *r)
+{
+	u64 lo = random_u32(r);
+	u64 hi = random_u32(r);
+	return lo|(hi << 32);
+}
+
+// returns random [0, 1) f32
+f32 random_unilateral(Random_Series *r)
+{
+	u32 exponent = 127;
+	u32 mantissa = random_u32(r) >> 9;
+	u32 bits = (exponent << 23) | mantissa;
+	f32 result = *(f32 *)&bits - 1.0f;
+	return result;
+}
+
+f64 random_unilateral_f64(Random_Series *r)
+{
+	uint64_t exponent = 1023;
+	uint64_t mantissa = random_u64(r) >> 12;
+	uint64_t bits = (exponent << 52) | mantissa;
+	f64 as_f64 = *(f64 *)&bits;
+	f64 result = as_f64 - 1.0;
+	return result;
+}
+
+// returns random [-1, 1) f32
+f32 random_bilateral(Random_Series *r)
+{
+	return -1.0f + 2.0f*random_unilateral(r);
+}
+
+// returns random number in range [0, range)
+u32 random_choice(Random_Series *r, u32 s)
+{
+	// Fast Random Integer Generation in an Interval: https://arxiv.org/abs/1805.10941
+
+	u64 m = (u64)random_u32(r) * (u64)s;
+	u32 l = (u32)m;
+
+	if (l < s)
+	{
+		u32 t = -(i32)s % s;
+		while (l < t)
+		{
+			m = (u64)random_u32(r) * (u64)s;
+			l = (u32)m;
+		}
+	}
+
+	u32 result = (u32)(m >> 32);
+	return result;
+}
+
+// returns random number in range [1, sides]
+u32 dice_roll(Random_Series *r, u32 sides)
+{
+	u32 result = 1 + random_choice(r, sides);
+	return result;
+}
+
+u32 random_range_u32(Random_Series *r, u32 min, u32 max)
+{
+	u32 bound  = max - min;
+	u32 result = min + random_choice(r, bound);
+	return result;
+}
+
+i32 random_range_i32(Random_Series *r, i32 min, i32 max)
+{
+	i32 result = (i32)random_range_u32(r, (u32)min, (u32)max);
+	return result;
+}
+
+// returns random f32 in range [min, max)
+f32 random_range_f32(Random_Series *r, f32 min, f32 max)
+{
+	f32 range = random_unilateral(r);
+	f32 result = min + range*(max - min);
+	return result;
+}
+
+f64 random_range_f64(Random_Series *r, f64 min, f64 max)
+{
+	f64 range = random_unilateral_f64(r);
+	f64 result = min + range*(max - min);
+	return result;
+}
+
+V2 random_unilateral2(Random_Series *r)
+{
+	V2 result;
+	result.x = random_unilateral(r);
+	result.y = random_unilateral(r);
+	return result;
+}
+
+V3 random_unilateral3(Random_Series *r)
+{
+	V3 result;
+	result.x = random_unilateral(r);
+	result.y = random_unilateral(r);
+	result.z = random_unilateral(r);
+	return result;
+}
+
+V2 random_in_unit_square(Random_Series *r)
+{
+	V2 result;
+	result.x = random_bilateral(r);
+	result.y = random_bilateral(r);
+	return result;
+}
+
+V3 random_in_unit_cube(Random_Series *r)
+{
+	V3 result;
+	result.x = random_bilateral(r);
+	result.y = random_bilateral(r);
+	result.z = random_bilateral(r);
+	return result;
+}
+
+V2 random_in_unit_disk(Random_Series *r)
+{
+	V2 result;
+	for (;;)
+	{
+		result = random_in_unit_square(r);
+		if (v2_dot(result, result) < 1.0)
+		{
+			break;
+		}
+	}
+	return result;
+}
+
+V3 random_in_unit_sphere(Random_Series *r)
+{
+	V3 result;
+	for (;;)
+	{
+		result = random_in_unit_cube(r);
+		if (v3_dot(result, result) < 1.0)
+		{
+			break;
+		}
+	}
+	return result;
+}
+
+//
 // Virtual Memory
+//
 
 isz vm_page_size(void)
 {
@@ -1115,7 +1546,7 @@ void *arena_alloc_ex_(Arena *arena, isz size, isz align, bool zero_memory, bool 
 {
 	(void)do_not_allocate_debug_node;
 
-	dc_assert(align < DC_ARENA_MAX_ALIGN);
+	dc_assert(align <= DC_ARENA_MAX_ALIGN);
 
 	u8 *result = NULL;
 
@@ -1374,6 +1805,21 @@ void arena_scope_abandon(Arena *arena)
 	}
 }
 
+void arena_instantiate_thread_temp(void)
+{
+	Thread_Context *tctx = get_tctx();
+	for (isz i = 0; i < dc_countof(tctx->temp_arenas); i += 1)
+	{
+		if (tctx->temp_arenas[i] == NULL)
+		{
+			char buf[64];
+			String name = string_format_into_buffer(buf, sizeof(buf), "tctx(-1).temp[%zd]", i);
+
+			tctx->temp_arenas[i] = arena_make(name);
+		}
+	}
+}
+
 Arena *arena_get_temp(void)
 {
 	Thread_Context *tctx = get_tctx();
@@ -1546,7 +1992,7 @@ isz cstring_count(char const *str)
 	return (isz)strlen(str);
 }
 
-isz cstring16_count(u16 const *str)
+isz cstring16_count(char16 const *str)
 {
 	isz result = 0;
 	for (u16 const *c = str; *c; c += 1, result += 1);
@@ -1559,9 +2005,9 @@ String string(char const *chars, isz count)
 	return result;
 }
 
-String16 string16(u16 const *chars, isz count)
+String16 string16(char16 const *chars, isz count)
 {
-	String16 result = { (u16 *)chars, count };
+	String16 result = { (char16 *)chars, count };
 	return result;
 }
 
@@ -1580,9 +2026,9 @@ String string_from_cstring(char const *cstr)
 	return DC_COMPOUND_LIT(String){ (char *)cstr, cstring_count(cstr) };
 }
 
-String16 string16_from_cstring(u16 const *cstr)
+String16 string16_from_cstring(char16 const *cstr)
 {
-	return DC_COMPOUND_LIT(String16){ (u16 *)cstr, cstring16_count(cstr) };
+	return DC_COMPOUND_LIT(String16){ (char16 *)cstr, cstring16_count(cstr) };
 }
 
 String string_from_pointers(char const *start, char const *end)
@@ -1619,7 +2065,7 @@ String string_null_terminate(Arena *arena, String str)
 String16 string16_null_terminate(Arena *arena, String16 str)
 {
 	String16 result;
-	result.chars = arena_alloc_array_nozero(arena, str.count + 1, u16);
+	result.chars = arena_alloc_array_nozero(arena, str.count + 1, char16);
 	result.count = str.count;
 
 	copy_array(result.chars, str.chars, result.count);
@@ -1705,7 +2151,7 @@ rune utf8_decode(char const **cursor, isz *remaining)
 	return code_point;
 }
 
-rune utf16_decode(u16 const **cursor, isz *remaining)
+rune utf16_decode(char16 const **cursor, isz *remaining)
 {
 	u16 const *s = *cursor;
 	rune unit = s[0];
@@ -1740,7 +2186,7 @@ rune utf16_decode(u16 const **cursor, isz *remaining)
 	return unit;
 }
 
-isz utf16_from_utf8_into_buffer(u16 *dst, isz dst_capacity, char const *src, isz src_length)
+isz utf16_from_utf8_into_buffer(char16 *dst, isz dst_capacity, char const *src, isz src_length)
 {
 	isz required = 1; // The null terminator.
 	isz written = 0;
@@ -1796,7 +2242,7 @@ isz utf16_from_utf8_into_buffer(u16 *dst, isz dst_capacity, char const *src, isz
 	return required;
 }
 
-isz utf8_from_utf16_into_buffer(char *dst, isz dst_capacity, u16 const *src, isz src_length)
+isz utf8_from_utf16_into_buffer(char *dst, isz dst_capacity, char16 const *src, isz src_length)
 {
 	isz required = 1; // The null terminator.
 	isz written = 0;
@@ -1868,7 +2314,7 @@ String16 utf16_from_utf8(Arena *arena, String utf8)
 	isz required = utf16_from_utf8_into_buffer(NULL, 0, utf8.chars, utf8.count);
 
 	String16 result;
-	result.chars = arena_alloc_array_nozero(arena, required, u16);
+	result.chars = arena_alloc_array_nozero(arena, required, char16);
 	result.count = required - 1;
 
 	utf16_from_utf8_into_buffer(result.chars, required, utf8.chars, utf8.count);
@@ -4589,6 +5035,512 @@ void tls_set(TLS_Handle handle, void *value)
 #else
 	pthread_setspecific(handle.handle, value);
 #endif
+}
+
+//
+// Threading
+//
+
+#if defined(__APPLE__)
+// macOS 14.4+
+// TODO(daniel): Fall back to __ulock_wait when needed? https://shift.click/blog/futex-like-apis/
+#include <os/os_sync_wait_on_address.h>
+#elif defined(_WIN32)
+#pragma comment(lib, "Synchronization.lib")
+#endif
+
+bool futex_wait(Futex *futex, u32 expected_value)
+{
+	return futex_wait_with_timeout(futex, expected_value, 0);
+}
+
+bool futex_wait_with_timeout(Futex *futex, u32 expected_value, u64 timeout_ns)
+{
+#if defined(_WIN32)
+	DWORD timeout = timeout_ns > 0 ? (DWORD)(timeout_ns / 1000000) : INFINITE;
+	return WaitOnAddress((void *)futex, &expected_value, sizeof(*futex), timeout);
+#elif defined(__APPLE__)
+	int err;
+
+	if (timeout_ns > 0)
+	{
+		err = os_sync_wait_on_address_with_timeout(futex, expected_value, sizeof(*futex), 0, OS_CLOCK_MACH_ABSOLUTE_TIME, timeout_ns);
+	}
+	else
+	{
+		err = os_sync_wait_on_address(futex, expected_value, sizeof(*futex), 0);
+	}
+
+	if (err >= 0)
+	{
+		return true;
+	}
+
+	switch (errno())
+	{
+		case -EINTR:
+		case -EFAULT:
+			return true;
+	}
+
+	return false;
+#else
+#error TODO: Other platforms
+#endif
+}
+
+bool futex_signal(Futex *futex)
+{
+#if defined(_WIN32)
+	WakeByAddressSingle((void *)futex);
+	return true;
+#elif defined(__APPLE__)
+	return os_sync_wake_by_address_any(futex, sizeof(*futex), 0) == 0;
+#else
+#error TODO: Other platforms
+#endif
+}
+
+bool futex_broadcast(Futex *futex)
+{
+#if defined(_WIN32)
+	WakeByAddressAll((void *)futex);
+	return true;
+#elif defined(__APPLE__)
+	return os_sync_wake_by_address_all(futex, sizeof(*futex), 0) == 0;
+#else
+#error TODO: Other platforms
+#endif
+}
+
+#if defined(_WIN32)
+fn_local DWORD WINAPI win32_thread_proc(void *user_data)
+{
+	Thread *thread = (Thread *)user_data;
+	thread->proc(thread);
+	return 0;
+}
+#else
+fn_local void *pthread_thread_proc(void *user_data)
+{
+	Thread *thread = (Thread *)user_data;
+	thread->proc(thread);
+	return NULL;
+}
+#endif
+
+void thread_start_with_inline_data(Thread *thread, Thread_Proc proc, void const *data, isz data_size)
+{
+	dc_assert(data_size <= DC_THREAD_INLINE_DATA_SIZE);
+	copy_bytes(thread->user_data, data, data_size);
+
+	thread->proc = proc;
+#if defined(_WIN32)
+	thread->os_handle = CreateThread(NULL, 0, win32_thread_proc, thread, 0, (LPDWORD)&thread->id);
+#else
+	pthread_create((pthread_t *)&thread->os_handle, NULL, pthread_thread_proc, thread);
+#endif
+}
+
+void thread_start(Thread *thread, Thread_Proc proc, void *user_ptr0)
+{
+	thread_start_with_inline_data(thread, proc, &user_ptr0, sizeof(user_ptr0));
+}
+
+//
+// Job System
+//
+
+Job_Index encode_job_index(u16 thread_index, u16 job_index)
+{
+	dc_assert_debug(job_index < (1u << DC_JOB_INDEX_JOB_BITS));
+
+	Job_Index result = job_index | (thread_index << DC_JOB_INDEX_JOB_BITS);
+	return result;
+}
+
+void decode_job_index(Job_Index job_index, u16 *out_thread_index, u16 *out_job_index)
+{
+	*out_job_index    = job_index & ((1u << DC_JOB_INDEX_JOB_BITS) - 1);
+	*out_thread_index = job_index >> DC_JOB_INDEX_JOB_BITS;
+}
+
+void job_add_continuation(Job *ancestor, Job *continuation)
+{
+	dc_assert(ancestor->continuation_count < dc_countof(ancestor->continuations));
+	ancestor->continuations[ancestor->continuation_count++] = continuation->job_index;
+}
+
+void copy_job_data(Job *job, void const *data, isz data_size)
+{
+	dc_assert(data_size < dc_sizeof(job->user_data));
+	copy_bytes(job->user_data, data, data_size);
+}
+
+// https://inria.hal.science/hal-00802885/document
+
+void work_stealing_queue_init(Work_Stealing_Queue *q, u16 *indices, isz size)
+{
+	q->top     = 0;
+	q->bottom  = 0;
+	q->size    = size;
+	q->mask    = size - 1;
+	q->indices = indices;
+}
+
+bool work_stealing_queue_push(Work_Stealing_Queue *q, u16 index)
+{
+	bool result = false;
+
+	isz b = atomic_load_explicit(&q->bottom, memory_order_relaxed);
+	isz t = atomic_load_explicit(&q->top, memory_order_relaxed);
+	if (b - t <= q->mask)
+	{
+		atomic_store_explicit(&q->indices[b & q->mask], index, memory_order_relaxed);
+		atomic_thread_fence(memory_order_release);
+		atomic_store_explicit(&q->bottom, b + 1, memory_order_relaxed);
+		result = true;
+	}
+
+	return result;
+}
+
+u16 work_stealing_queue_pop(Work_Stealing_Queue *q)
+{
+	u16 result = 0xFFFFu;
+
+	isz b = atomic_load_explicit(&q->bottom, memory_order_relaxed) - 1;
+	atomic_store_explicit(&q->bottom, b, memory_order_relaxed);
+
+	atomic_thread_fence(memory_order_seq_cst);
+
+	isz t = atomic_load_explicit(&q->top, memory_order_relaxed);
+
+	if (t <= b)
+	{
+		// Non-empty queue
+		result = atomic_load_explicit(&q->indices[b & q->mask], memory_order_relaxed);
+
+		if (t == b)
+		{
+			if (!atomic_compare_exchange_strong_explicit(&q->top, &t, t + 1, memory_order_seq_cst, memory_order_relaxed))
+			{
+				// Failed race
+				result = 0xFFFFu;
+			}
+
+			atomic_store_explicit(&q->bottom, b + 1, memory_order_relaxed);
+		}
+	}
+	else
+	{
+		atomic_store_explicit(&q->bottom, b + 1, memory_order_relaxed);
+	}
+
+	return result;
+}
+
+u16 work_stealing_queue_steal(Work_Stealing_Queue *q)
+{
+	u16 result = 0xFFFFu;
+
+	isz t = atomic_load_explicit(&q->top, memory_order_acquire);
+	atomic_thread_fence(memory_order_seq_cst);
+	isz b = atomic_load_explicit(&q->bottom, memory_order_acquire);
+
+	if (t < b)
+	{
+		result = atomic_load_explicit(&q->indices[t & q->mask], memory_order_relaxed);
+		if (!atomic_compare_exchange_strong_explicit(&q->top, &t, t + 1, memory_order_seq_cst, memory_order_relaxed))
+		{
+			result = 0xFFFFu;
+		}
+	}
+
+	return result;
+}
+
+fn_local Job *allocate_job(Job_System_Worker_Thread *thread)
+{
+	u16 index = (u16)(thread->next_job++ & (DC_MAX_JOBS_PER_QUEUE - 1));
+
+	Job *job = &thread->job_allocator[index];
+	job->job_index = encode_job_index(thread->thread_index, index);
+
+	return job;
+}
+
+fn_local Job *worker_get_job(Job_System_Worker_Thread *thread)
+{
+	Job_System *job_system = thread->job_system;
+
+	Job *job = job_from_index(work_stealing_queue_pop(&thread->queue));
+	if (job == NULL)
+	{
+		u16 random_index = (u16)random_choice(&thread->random, (u32)job_system->thread_count);
+
+		if (random_index != thread->thread_index)
+		{
+			job = job_from_index(work_stealing_queue_steal(&job_system->threads[random_index]->queue));
+		}
+	}
+
+	if (job == NULL)
+	{
+		os_processor_yield();
+	}
+
+	return job;
+}
+
+fn_local void finish_job(Job_System *job_system, Job *job)
+{
+	i16 unfinished_jobs = atomic_fetch_sub_explicit(&job->unfinished_jobs, 1, memory_order_relaxed) - 1;
+	if (unfinished_jobs == 0)
+	{
+		if (job->parent != 0xFFFFu)
+		{
+			Job *parent = job_from_index(job->parent);
+			finish_job(job_system, parent);
+		}
+
+		u8 continuation_count = job->continuation_count;
+		for (usz i = 0; i < continuation_count; i += 1)
+		{
+			Job *continuation = job_from_index(job->continuations[i]);
+			job_run(continuation);
+		}
+	}
+}
+
+fn_local void execute_job(Job_System *job_system, Job_Execution_Context *ctx, Job *job)
+{
+	job->proc(job, ctx);
+	finish_job(job_system, job);
+}
+
+fn_local void job_system_worker_thread_loop(Job_System_Worker_Thread *thread)
+{
+	Job_System *job_system = thread->job_system;
+
+	// Force temp arenas to be instantiated so we can scope them.
+	arena_instantiate_thread_temp();
+
+	Thread_Context *tctx = get_tctx();
+
+	u64 failed_to_get_job_count = 64;
+
+	while (atomic_load_explicit(&thread->running, memory_order_relaxed))
+	{
+		Job *job = worker_get_job(thread);
+
+		if (job != NULL)
+		{
+			failed_to_get_job_count = 0;
+
+			arena_scope_begin(tctx->temp_arenas[0]);
+			arena_scope_begin(tctx->temp_arenas[1]);
+
+			Job_Execution_Context context;
+			context.worker_thread_index = (isz)thread->thread_index;
+
+			execute_job(job_system, &context, job);
+
+			arena_scope_end(tctx->temp_arenas[0]);
+			arena_scope_end(tctx->temp_arenas[1]);
+		}
+		else
+		{
+			failed_to_get_job_count += 1;
+
+			if (failed_to_get_job_count >= 64)
+			{
+				futex_wait(&job_system->jobs_in_flight, 0);
+			}
+		}
+	}
+}
+
+fn_local void job_system_worker_thread_proc(Thread *in_thread)
+{
+	Job_System_Worker_Thread *thread = in_thread->user_ptrs[0];
+
+	Job_System *job_system = thread->job_system;
+	tls_set(job_system->this_thread, thread);
+
+	job_system_worker_thread_loop(thread);
+}
+
+void job_system_init(isz thread_count)
+{
+	dc_assert(thread_count > 0);
+	dc_assert(thread_count <= DC_MAX_WORKER_THREADS);
+
+	DC_Context *ctx = dc_get_context();
+	dc_assert(ctx->job_system == NULL);
+
+	ctx->job_system = arena_alloc_struct(ctx->arena, Job_System);
+
+	Job_System *job_system = ctx->job_system;
+	job_system->thread_count = thread_count;
+	job_system->this_thread = tls_allocate();
+
+	// Set up main thread
+	{
+		job_system->threads[0] = arena_alloc_struct(ctx->arena, Job_System_Worker_Thread);
+
+		Job_System_Worker_Thread *thread = job_system->threads[0];
+		thread->job_system   = job_system;
+		thread->thread_index = 0;
+		thread->random       = random_series_make(thread->thread_index);
+		thread->running      = true;
+
+		work_stealing_queue_init(&thread->queue, thread->queue_indices, dc_countof(thread->queue_indices));
+
+		tls_set(job_system->this_thread, thread);
+	}
+
+	for (isz i = 1; i < job_system->thread_count; i += 1)
+	{
+		job_system->threads[i] = arena_alloc_struct(ctx->arena, Job_System_Worker_Thread);
+
+		Job_System_Worker_Thread *thread = job_system->threads[i];
+		thread->job_system   = job_system;
+		thread->thread_index = (u16)i;
+		thread->random       = random_series_make(thread->thread_index);
+		thread->running      = true;
+
+		work_stealing_queue_init(&thread->queue, thread->queue_indices, dc_countof(thread->queue_indices));
+
+		thread_start(&thread->thread, job_system_worker_thread_proc, thread);
+	}
+}
+
+Job *job_from_index(Job_Index index)
+{
+	if (index == 0xFFFFu) return NULL;
+
+	Job_System *job_system = _G->job_system;
+
+	u16 thread_index, job_index;
+	decode_job_index(index, &thread_index, &job_index);
+
+	Job *job = &job_system->threads[thread_index]->job_allocator[job_index];
+	dc_assert_debug(job->job_index == index);
+
+	return job;
+}
+
+fn_local void job_empty(Job *job, Job_Execution_Context *context)
+{
+	(void)job;
+	(void)context;
+}
+
+Job *job_create(Job_Proc proc, Job *parent)
+{
+	return job_create_with_data(proc, parent, NULL, 0);
+}
+
+Job *job_create_with_data(Job_Proc proc, Job *parent, void const *data, isz data_size)
+{
+	if (parent != NULL)
+	{
+		atomic_fetch_add_explicit(&parent->unfinished_jobs, 1, memory_order_relaxed);
+	}
+
+	Job_System_Worker_Thread *thread = tls_get(_G->job_system->this_thread);
+
+	Job *job = allocate_job(thread);
+	job->proc               = proc ? proc : job_empty;
+	job->parent             = parent ? parent->job_index : 0xFFFFu;
+	job->flags              = 0;
+	job->unfinished_jobs    = 1;
+	job->continuation_count = 0;
+
+	if (data != NULL && data_size > 0)
+	{
+		copy_job_data(job, data, data_size);
+	}
+
+	return job;
+}
+
+void job_run(Job *job)
+{
+	Job_System *job_system = _G->job_system;
+	Job_System_Worker_Thread *thread = tls_get(job_system->this_thread);
+
+	if (job->flags & Job_Flag_run_immediately)
+	{
+		Job_Execution_Context context;
+		context.worker_thread_index = thread->thread_index;
+
+		execute_job(job_system, &context, job);
+	}
+	else
+	{
+		work_stealing_queue_push(&thread->queue, job->job_index);
+
+		if (atomic_fetch_add_explicit(&job_system->jobs_in_flight, 1, memory_order_relaxed) == 0)
+		{
+			futex_signal(&job_system->jobs_in_flight);
+		}
+		else
+		{
+			futex_broadcast(&job_system->jobs_in_flight);
+		}
+	}
+}
+
+isz job_unfinished_count(Job *job)
+{
+	return job ? atomic_load_explicit(&job->unfinished_jobs, memory_order_relaxed) : 0;
+}
+
+bool job_has_completed(Job *job)
+{
+	return job_unfinished_count(job) == 0;
+}
+
+void job_wait(Job *job)
+{
+	if (job == NULL) return;
+
+	Job_System *job_system = _G->job_system;
+	Job_System_Worker_Thread *thread = tls_get(job_system->this_thread);
+
+	while (!job_has_completed(job))
+	{
+		Job *next_job = worker_get_job(thread);
+
+		if (next_job != NULL)
+		{
+			Job_Execution_Context ctx;
+			ctx.worker_thread_index = thread->thread_index;
+
+			execute_job(job_system, &ctx, next_job);
+		}
+	}
+}
+
+void job_wait_all(void)
+{
+	Job_System *job_system = _G->job_system;
+	Job_System_Worker_Thread *thread = tls_get(job_system->this_thread);
+
+	while (atomic_load_explicit(&job_system->jobs_in_flight, memory_order_relaxed) > 0)
+	{
+		Job *next_job = worker_get_job(thread);
+
+		if (next_job != NULL)
+		{
+			Job_Execution_Context ctx;
+			ctx.worker_thread_index = thread->thread_index;
+
+			execute_job(job_system, &ctx, next_job);
+		}
+	}
 }
 
 //
