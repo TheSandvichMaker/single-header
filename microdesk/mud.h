@@ -26,7 +26,7 @@
 		if (result.error != Mud_Error_none)
 		{
 			// TODO: Error reporting
-			exit(-1):
+			exit(-1);
 		}
 
 		Mud_Node *root = result.root;
