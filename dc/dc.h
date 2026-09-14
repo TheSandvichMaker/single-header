@@ -42,27 +42,6 @@ extern "C" {
 // Typedefs
 //
 
-#ifndef __cplusplus
-	#include <stdbool.h>
-	#ifndef alignof
-		#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-			#define alignof(x) _Alignof(x)
-		#else
-			#define alignof(type) (sizeof(struct { char dc_align_c_; type dc_align_t_; }) - sizeof(type))
-		#endif
-	#endif
-
-	#ifndef alignas
-		#define alignas(x) _Alignas(x)
-	#endif
-
-	#if defined(_MSC_VER)
-		#define dc_thread_local __declspec(thread)
-	#else
-		#define dc_thread_local _Thread_local
-	#endif
-#endif
-
 typedef float    f32;
 typedef double   f64;
 
@@ -176,9 +155,67 @@ fn_local u8 *align_pointer(void *ptr, isz align)
 
 #define DC_DEFER_LOOP(begin, end) for (i32 PASTE(_i_, __LINE__) = (begin, 0); !PASTE(_i_, __LINE__); PASTE(_i_, __LINE__) += (end, 1))
 
+#ifndef __cplusplus
+	#include <stdbool.h>
+	#ifndef alignof
+		#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+			#define alignof(x) _Alignof(x)
+		#else
+			#define alignof(type) (sizeof(struct { char dc_align_c_; type dc_align_t_; }) - sizeof(type))
+		#endif
+	#endif
+
+	#ifndef alignas
+		#define alignas(x) _Alignas(x)
+	#endif
+
+	#if defined(_MSC_VER)
+		#define dc_thread_local __declspec(thread)
+	#else
+		#define dc_thread_local _Thread_local
+	#endif
+
+	#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+		#define dc_static_assert(cond, message) _Static_assert(cond, message)
+	#else
+		#define dc_static_assert(cond, message) typedef char PASTE(static_assert__, __LINE__)[cond ? 1 : -1];
+	#endif
+#else
+	#define dc_static_assert(cond, message) static_assert(cond, message)
+#endif
+
 //
 // Math Types
 //
+
+typedef struct Range
+{
+	isz first;
+	isz one_past_last;
+} Range;
+
+fn_local Range range_make(isz first, isz one_past_last)
+{
+	Range range;
+	range.first         = first;
+	range.one_past_last = one_past_last;
+	return range;
+}
+
+fn_local Range range_make_with_count(isz first, isz count)
+{
+	Range range;
+	range.first         = first;
+	range.one_past_last = first + count;
+	return range;
+}
+
+fn_local isz range_count(Range range)
+{
+	return range.one_past_last - range.first;
+}
+
+#define EachInRange(it, range) isz it = (range).first; it != (range).one_past_last; it += ((range).first < (range).one_past_last ? 1 : -1)
 
 typedef union V2
 {
@@ -299,6 +336,7 @@ typedef struct String16
 #include <assert.h>
 
 #define dc_assert(...) assert(__VA_ARGS__)
+// TODO
 #define dc_assert_debug(...) assert(__VA_ARGS__)
 #define dc_always(x) (assert(x), x)
 #define dc_never(x) (assert(!(x)), x)
@@ -1071,8 +1109,8 @@ typedef struct Job
 {
 	Job_Proc             proc;               // 8
 	Job_Index            parent;             // 10
-	DC_ATOMIC(i16)       unfinished_jobs;    // 12
-	Job_Index            job_index;          // 14
+	Job_Index            job_index;          // 12
+	DC_ATOMIC(i16)       unfinished_jobs;    // 14
 	DC_ATOMIC(Job_Flags) flags;              // 15
 	u8                   continuation_count; // 16
 	Job_Index            continuations[8];   // 32
@@ -1082,6 +1120,8 @@ typedef struct Job
 		void *user_ptrs[DC_MAXIMUM_INLINE_JOB_DATA_SIZE / sizeof(void *)];
 	};
 } Job;
+
+dc_static_assert(dc_sizeof(Job) == 64, "Job should be cache-line sized");
 
 fn Job_Index encode_job_index(u16 thread_index, u16 job_index);
 fn void decode_job_index(Job_Index in_job_index, u16 *out_thread_index, u16 *out_job_index);
@@ -1141,6 +1181,12 @@ fn isz  job_unfinished_count(Job *job);
 fn bool job_has_completed(Job *job);
 fn void job_wait(Job *job);
 fn void job_wait_all(void);
+fn void *job_get_inline_data_raw(Job *job);
+#define job_get_inline_data(job, type) (dc_assert_debug(dc_sizeof(type) <= DC_MAXIMUM_INLINE_JOB_DATA_SIZE), (type *)job_get_inline_data_raw(job))
+
+typedef void (*Parallel_For_Proc)(void *data, Range range);
+
+fn Job *parallel_for(Parallel_For_Proc proc, isz count, void *user_data);
 
 //
 // Global context (used to allow global library state to survive hot reloading)
@@ -3364,12 +3410,12 @@ Parse_Number_Result string_parse_i64(String string)
 	u64 max_value = (u64)INT64_MAX + (sign == -1 ? 1 : 0);
 	if (result.value_u64 >= max_value)
 	{
-		result.value_i64 = sign == 1 ? INT64_MAX : INT64_MIN;
-
 		if (result.value_u64 > max_value)
 		{
 			result.overflowed = sign;
 		}
+
+		result.value_i64 = sign == 1 ? INT64_MAX : INT64_MIN;
 	}
 	else
 	{
@@ -3379,86 +3425,39 @@ Parse_Number_Result string_parse_i64(String string)
 	return result;
 }
 
-Parse_Number_Result string_parse_u32(String string)
+fn_local Parse_Number_Result string_parse_unsigned(String string, u64 max)
 {
 	Parse_Number_Result result = string_parse_u64(string);
-	if (result.value_u64 > UINT32_MAX)
+	if (result.value_u64 > max)
 	{
-		result.value_u64  = UINT32_MAX;
+		result.value_u64  = max;
 		result.overflowed = 1;
 	}
 	return result;
 }
 
-Parse_Number_Result string_parse_i32(String string)
+fn_local Parse_Number_Result string_parse_signed(String string, i64 min, i64 max)
 {
 	Parse_Number_Result result = string_parse_i64(string);
-	if (result.value_i64 > INT32_MAX)
+	if (result.value_i64 > max)
 	{
-		result.value_i64  = INT32_MAX;
+		result.value_i64  = max;
 		result.overflowed = 1;
 	}
-	else if (result.value_i64 < INT32_MIN)
+	else if (result.value_i64 < min)
 	{
-		result.value_i64  = INT32_MIN;
+		result.value_i64  = min;
 		result.overflowed = -1;
 	}
 	return result;
 }
 
-Parse_Number_Result string_parse_u16(String string)
-{
-	Parse_Number_Result result = string_parse_u64(string);
-	if (result.value_u64 > UINT16_MAX)
-	{
-		result.value_u64  = UINT16_MAX;
-		result.overflowed = 1;
-	}
-	return result;
-}
-
-Parse_Number_Result string_parse_i16(String string)
-{
-	Parse_Number_Result result = string_parse_i64(string);
-	if (result.value_i64 > INT16_MAX)
-	{
-		result.value_i64  = INT16_MAX;
-		result.overflowed = 1;
-	}
-	else if (result.value_i64 < INT16_MIN)
-	{
-		result.value_i64  = INT16_MIN;
-		result.overflowed = -1;
-	}
-	return result;
-}
-
-Parse_Number_Result string_parse_u8(String string)
-{
-	Parse_Number_Result result = string_parse_u64(string);
-	if (result.value_u64 > UINT8_MAX)
-	{
-		result.value_u64  = UINT8_MAX;
-		result.overflowed = 1;
-	}
-	return result;
-}
-
-Parse_Number_Result string_parse_i8(String string)
-{
-	Parse_Number_Result result = string_parse_i64(string);
-	if (result.value_i64 > INT8_MAX)
-	{
-		result.value_i64  = INT8_MAX;
-		result.overflowed = 1;
-	}
-	else if (result.value_i64 < INT8_MIN)
-	{
-		result.value_i64  = INT8_MIN;
-		result.overflowed = -1;
-	}
-	return result;
-}
+Parse_Number_Result string_parse_u32(String string) { return string_parse_unsigned(string, UINT32_MAX); }
+Parse_Number_Result string_parse_u16(String string) { return string_parse_unsigned(string, UINT16_MAX); }
+Parse_Number_Result string_parse_u8 (String string) { return string_parse_unsigned(string, UINT8_MAX);  }
+Parse_Number_Result string_parse_i32(String string) { return string_parse_signed(string, INT32_MIN, INT32_MAX); }
+Parse_Number_Result string_parse_i16(String string) { return string_parse_signed(string, INT16_MIN, INT16_MAX); }
+Parse_Number_Result string_parse_i8 (String string) { return string_parse_signed(string, INT8_MIN,  INT8_MAX);  }
 
 Parse_Number_Result string_parse_f64(String string)
 {
@@ -5176,7 +5175,7 @@ void job_add_continuation(Job *ancestor, Job *continuation)
 
 void copy_job_data(Job *job, void const *data, isz data_size)
 {
-	dc_assert(data_size < dc_sizeof(job->user_data));
+	dc_assert(data_size <= dc_sizeof(job->user_data));
 	copy_bytes(job->user_data, data, data_size);
 }
 
@@ -5554,6 +5553,63 @@ void job_wait_all(void)
 			execute_job(job_system, &ctx, next_job);
 		}
 	}
+}
+
+void *job_get_inline_data_raw(Job *job)
+{
+	return &job->user_data[0];
+}
+
+typedef struct Parallel_For_Data
+{
+	Parallel_For_Proc proc;
+	isz               first_index;
+	isz               count;
+	void             *data;
+} Parallel_For_Data;
+
+fn_local void parallel_for_job(Job *job, Job_Execution_Context *ctx)
+{
+	(void)ctx;
+
+	Parallel_For_Data *data = job_get_inline_data(job, Parallel_For_Data);
+
+	if (data->count > 256)
+	{
+		isz count_l = data->count / 2;
+		isz count_r = data->count - count_l;
+
+		Parallel_For_Data data_l;
+		data_l.proc        = data->proc;
+		data_l.first_index = data->first_index;
+		data_l.count       = count_l;
+		data_l.data        = data->data;
+
+		job_run(job_create_with_data(parallel_for_job, job, &data_l, sizeof(data_l)));
+
+		Parallel_For_Data data_r;
+		data_r.proc        = data->proc;
+		data_r.first_index = data->first_index + count_l;
+		data_r.count       = count_r;
+		data_r.data        = data->data;
+
+		job_run(job_create_with_data(parallel_for_job, job, &data_r, sizeof(data_r)));
+	}
+	else
+	{
+		data->proc(data->data, range_make_with_count(data->first_index, data->count));
+	}
+}
+
+Job *parallel_for(Parallel_For_Proc proc, isz count, void *user_data)
+{
+	Parallel_For_Data data;
+	data.proc        = proc;
+	data.first_index = 0;
+	data.count       = count;
+	data.data        = user_data;
+
+	return job_create_with_data(parallel_for_job, NULL, &data, sizeof(data));
 }
 
 //

@@ -5,18 +5,31 @@
 
 void test_integer_parsing(Test_Context *t)
 {
-	String i64_min = S("-9223372036854775807");
+	String i64_min = S("-9223372036854775808");
 	String i64_max = S("9223372036854775807");
+	String u64_max = S("0xffffffffffffffff");
 
 	Parse_Number_Result result;
+
+	result = string_parse_u64(u64_max);
+	TEST_CHECK(t, result.is_valid);
+	TEST_CHECK(t, result.value_u64 == UINT64_MAX);
+	TEST_CHECK(t, !result.overflowed);
+
+	result = string_parse_i64(u64_max);
+	TEST_CHECK(t, result.is_valid);
+	TEST_CHECK(t, result.value_i64 == INT64_MAX);
+	TEST_CHECK(t, result.overflowed == 1);
 
 	result = string_parse_i64(i64_min);
 	TEST_CHECK(t, result.is_valid);
 	TEST_CHECK(t, result.value_i64 == INT64_MIN);
+	TEST_CHECK(t, result.overflowed == 0);
 
 	result = string_parse_i64(i64_max);
 	TEST_CHECK(t, result.is_valid);
 	TEST_CHECK(t, result.value_i64 == INT64_MAX);
+	TEST_CHECK(t, !result.overflowed);
 
 	String hex_upper = S("0X123456789ABCDEF");
 	String hex_lower = S("0x123456789abcdef");
@@ -35,14 +48,14 @@ void test_integer_parsing(Test_Context *t)
 	TEST_CHECK(t, result.is_valid);
 	TEST_CHECK(t, result.value_u64 == 01234567);
 
-	for (i64 i = INT32_MIN; i < INT32_MAX; i += 1337)
+	for (i64 i = INT16_MIN; i <= INT16_MAX; i += 1)
 	{
 		char buf[64];
 		String str = string_format_into_buffer(buf, sizeof(buf), "%lld", i);
 
-		result = string_parse_i32(str);
+		result = string_parse_i16(str);
 		TEST_CHECK(t, result.is_valid);
-		TEST_CHECK(t, result.value_i32 == i);
+		TEST_CHECK(t, result.value_i16 == i);
 	}
 
 	// Too small
@@ -88,28 +101,77 @@ fn_local void test_job(Job *job, Job_Execution_Context *ctx)
 	values[ctx->worker_thread_index] += 1;
 }
 
-void test_job_system(Test_Context *t)
+fn_local void finalize_job(Job *job, Job_Execution_Context *ctx)
 {
-	(void)t;
+	(void)ctx;
 
-	int values[8] = {0};
-
-	Job *root = job_create(NULL, NULL);
-	
-	for (int i = 0; i < 1024; i += 1)
-	{
-		Job *job = job_create(test_job, root);
-		job->user_ptrs[0] = values;
-
-		job_run(job);
-	}
-
-	job_run(root);
-	job_wait(root);
-
+	int *sum    = (int *)job->user_ptrs[0];
+	int *values = (int *)job->user_ptrs[1];
 	for (int i = 0; i < 8; i += 1)
 	{
-		fprintf(stderr, "values[%d] = %d\n", i, values[i]);
+		*sum += values[i];
+	}
+}
+
+typedef struct Parallel_For_Test_Data
+{
+	int  addend;
+	int *values;
+} Parallel_For_Test_Data;
+
+void parallel_for_proc(void *in_data, Range range)
+{
+	Parallel_For_Test_Data *data = in_data;
+
+	for (EachInRange(i, range))
+	{
+		data->values[i] += data->addend;
+	}
+}
+
+void test_job_system(Test_Context *t)
+{
+	{
+		int values[8] = {0};
+		int finalized = 0;
+
+		Job *root = job_create(NULL, NULL);
+	
+		for (int i = 0; i < 1024; i += 1)
+		{
+			Job *job = job_create(test_job, root);
+			job->user_ptrs[0] = values;
+
+			job_run(job);
+		}
+
+		Job *finalizer = job_create(finalize_job, NULL);
+		job_add_continuation(root, finalizer);
+		finalizer->user_ptrs[0] = &finalized;
+		finalizer->user_ptrs[1] = &values[0];
+
+		job_run(root);
+		job_wait(root);
+
+		int sum = 0;
+		for (int i = 0; i < 8; i += 1) sum += values[i];
+
+		TEST_CHECK(t, sum == finalized);
+	}
+
+	Arena_ScopedTemp {
+		Parallel_For_Test_Data data = {
+			.addend = 2,
+			.values = arena_alloc_array(temp, 8192, int),
+		};
+		Job *job = parallel_for(parallel_for_proc, 8192, &data);
+		job_run(job);
+		job_wait(job);
+
+		for (isz i = 0; i < 8192; i += 1)
+		{
+			TEST_CHECK(t, data.values[i] == data.addend);
+		}
 	}
 }
 
