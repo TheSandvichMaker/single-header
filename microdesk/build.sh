@@ -7,7 +7,7 @@ BUILD_DIR="$MUD_DIR/../build"
 CC="${CC:-clang}"
 AR="${AR:-ar}"
 
-MUD_FLAGS="-Wall -Wextra -Werror -g -std=c99 -fPIC"
+MUD_FLAGS="-Wall -Wextra -Werror -g -std=c99 -fPIC -O3"
 
 mkdir -p "$BUILD_DIR"
 mkdir -p "$MUD_DIR/bindings/odin/lib"

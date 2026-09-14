@@ -3,7 +3,7 @@ setlocal
 
 set MUD_DIR=%~dp0
 set BUILD_DIR=%MUD_DIR%..\build
-set MUD_FLAGS=/nologo /W4 /WX /Z7
+set MUD_FLAGS=/nologo /W4 /WX /Z7 /O2
 
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 if not exist "%MUD_DIR%bindings\odin\lib" mkdir "%MUD_DIR%bindings\odin\lib"
