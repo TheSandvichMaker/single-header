@@ -26,7 +26,7 @@
 		if (result.error != Mud_Error_none)
 		{
 			// TODO: Error reporting
-			exit(-1);
+			exit(-1):
 		}
 
 		Mud_Node *root = result.root;
@@ -71,10 +71,19 @@
 		my_object {
 			member1 = value     // Trailing comment 1
 			member2 [ 1, 2, 3 ] // Trailing comment 2
+			// Closing comment
 		} // Trailing comment 3
 
 	Here, the leading comment and trailing comment 3 are attached to my_object,
-	while trailing comments 1 and 2 are attached to member1 and member2
+	while trailing comments 1 and 2 are attached to member1 and member2. A
+	trailing comment must sit on the same line as the element it follows;
+	comments on their own line lead the element below them. The closing comment
+	has no element below it, so it is attached to my_object as well, separately
+	from its trailing comment.
+
+	A comment that is alone on its line keeps that line's leading whitespace, so
+	that a multi-line comment reads as one block the consumer can reindent as a
+	unit. A trailing comment starts at its first slash.
 
 	There are more defines you can use to configure the library, see below for
 	details.
@@ -215,6 +224,7 @@ typedef struct Mud_Node
 	MUD_STRING value_unquoted;
 	MUD_STRING leading_comment;
 	MUD_STRING trailing_comment;
+	MUD_STRING closing_comment;
 } Mud_Node;
 
 typedef struct Mud_Parser
@@ -248,6 +258,7 @@ typedef struct Mud_Parser
 		Mud_Int        col;
 		MUD_STRING     value;
 		Mud_Bool       is_newline;
+		Mud_Bool       crossed_newline;
 		char           kind;
 		Mud_Node_Flags flags;
 	} token;
@@ -422,6 +433,8 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 	p->token.kind         = Mud_Token_invalid;
 	p->token.is_newline   = 0;
 
+	Mud_Bool crossed_newline = 0;
+
 	Mud_Node_Flags flags = 0;
 
 	while (!mud_at_end(p))
@@ -461,6 +474,8 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 				p->line += 1;
 				p->col   = 0;
 
+				crossed_newline = 1;
+
 				if (p->insert_comma)
 				{
 					p->insert_comma = 0;
@@ -481,6 +496,7 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 			{
 				mud_next(p);
 				p->insert_comma = 0;
+				crossed_newline = 0;
 			} break;
 
 			// Number
@@ -682,13 +698,14 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 	}
 
 done:
-	p->token.start       = start;
-	p->token.end         = p->at;
-	p->token.value       = mud_string(p->token.start, (Mud_Int)(p->token.end - p->token.start));
-	p->token.line_start  = line_start;
-	p->token.line        = line;
-	p->token.col         = col;
-	p->token.flags       = flags;
+	p->token.start           = start;
+	p->token.end             = p->at;
+	p->token.value           = mud_string(p->token.start, (Mud_Int)(p->token.end - p->token.start));
+	p->token.line_start      = line_start;
+	p->token.line            = line;
+	p->token.col             = col;
+	p->token.flags           = flags;
+	p->token.crossed_newline = crossed_newline;
 
 	switch (p->token.kind)
 	{
@@ -751,6 +768,7 @@ MUD_INLINE Mud_Node *mud_allocate_node(Mud_Parser *p)
 	result->value_unquoted   = mud_string(NULL, 0);
 	result->leading_comment  = mud_string(NULL, 0);
 	result->trailing_comment = mud_string(NULL, 0);
+	result->closing_comment  = mud_string(NULL, 0);
 
 	return result;
 }
@@ -796,7 +814,7 @@ MUD_INLINE void mud_add_node(Mud_Node **first, Mud_Node **last, Mud_Node *node)
 	}
 }
 
-MUD_INLINE MUD_STRING mud_parse_comment(Mud_Parser *p)
+MUD_INLINE MUD_STRING mud_parse_comment(Mud_Parser *p, Mud_Bool same_line_only)
 {
 	MUD_STRING comment = mud_string(NULL, 0);
 
@@ -805,8 +823,26 @@ MUD_INLINE MUD_STRING mud_parse_comment(Mud_Parser *p)
 		char const *start = p->token.start;
 		char const *end   = p->token.end;
 
+		char const *indent = start;
+		while (indent > p->token.line_start && (indent[-1] == ' ' || indent[-1] == '\t'))
+		{
+			indent -= 1;
+		}
+		if (indent == p->token.line_start)
+		{
+			start = indent;
+		}
+
+		Mud_Bool first = 1;
+
 		while (mud_peek_token(p, Mud_Token_comment))
 		{
+			if (!first && same_line_only && p->token.crossed_newline)
+			{
+				break;
+			}
+			first = 0;
+
 			end = p->token.end;
 			mud_next_token(p);
 		}
@@ -944,11 +980,12 @@ MUD_INLINE void mud_parse_element(Mud_Parser *p, Mud_Node *node, Mud_Int parse_f
 
 	while (mud_keep_parsing(p))
 	{
-		MUD_STRING leading_comment = mud_parse_comment(p);
+		MUD_STRING leading_comment = mud_parse_comment(p, 0);
 
 		// Allow empty lists, and make sure comments before the end token don't cause problems.
 		if (mud_eat_token(p, end_token))
 		{
+			node->closing_comment = leading_comment;
 			break;
 		}
 
@@ -1067,9 +1104,9 @@ MUD_INLINE void mud_parse_element(Mud_Parser *p, Mud_Node *node, Mud_Int parse_f
 		// Feels a little messy.
 		Mud_Bool ate_comma = !p->token.is_newline && mud_eat_token(p, ',');
 
-		if (mud_peek_token(p, Mud_Token_comment))
+		if (mud_peek_token(p, Mud_Token_comment) && !p->token.crossed_newline)
 		{
-			child->trailing_comment = mud_parse_comment(p);
+			child->trailing_comment = mud_parse_comment(p, 1);
 		}
 
 		ate_comma |= mud_eat_token(p, ',');
