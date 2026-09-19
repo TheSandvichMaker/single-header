@@ -719,7 +719,7 @@ fn String_Pair string_split_identifier(String string);
 fn String string_iter_word(String *iter);
 fn String string_iter_line(String *iter);
 #define String_EachWord(word, words) String iter = words, word = string_iter_word(&iter); !string_empty(word); word = string_iter_word(&iter)
-#define String_EachLine(line, lines) String iter = lines, line = string_iter_line(&iter); !string_empty(line); line = string_iter_line(&iter)
+#define String_EachLine(line, lines) String iter = lines, line = string_iter_line(&iter); line.chars != NULL; line = string_iter_line(&iter)
 
 typedef struct Parse_Number_Result {
 	/*
@@ -1148,12 +1148,14 @@ fn u16  work_stealing_queue_steal(Work_Stealing_Queue *q);
 
 typedef struct Job_System_Worker_Thread
 {
-	struct Job_System *job_system;
+	struct Job_System *job_system; // 8
 
-	Thread thread;
+	Thread thread;                 // 96
 
-	u16           thread_index;
-	Random_Series random;
+	u16           thread_index;    // 98
+	Random_Series random;          // 104
+
+	PAD(88);
 
 	alignas(DC_CACHE_LINE_SIZE) DC_ATOMIC(bool) running; PAD(DC_CACHE_LINE_SIZE - sizeof(bool));
 
@@ -1165,7 +1167,7 @@ typedef struct Job_System_Worker_Thread
 
 typedef struct Job_System
 {
-	alignas(DC_CACHE_LINE_SIZE) Futex jobs_in_flight;
+	alignas(DC_CACHE_LINE_SIZE) Futex jobs_in_flight; PAD(DC_CACHE_LINE_SIZE - sizeof(Futex));
 	alignas(DC_CACHE_LINE_SIZE)
 
 	TLS_Handle this_thread;
@@ -1869,22 +1871,29 @@ void arena_instantiate_thread_temp(void)
 	}
 }
 
-Arena *arena_get_temp(void)
+fn_local Arena *arena_get_temp__internal(Thread_Context *tctx, isz index)
 {
-	Thread_Context *tctx = get_tctx();
-
-	Arena *arena = tctx->temp_arenas[tctx->temp_arena_index];
-	tctx->temp_arena_index = 1 - tctx->temp_arena_index;
+	Arena *arena = tctx->temp_arenas[index];
 
 	if (arena == NULL)
 	{
 		// TODO: thread id
 		char buf[64];
-		String name = string_format_into_buffer(buf, sizeof(buf), "tctx(-1).temp[%zd]", 1 - tctx->temp_arena_index);
+		String name = string_format_into_buffer(buf, sizeof(buf), "tctx(-1).temp[%zd]", index);
 
 		arena = arena_make(name);
-		tctx->temp_arenas[1 - tctx->temp_arena_index] = arena;
+		tctx->temp_arenas[index] = arena;
 	}
+
+	return arena;
+}
+
+Arena *arena_get_temp(void)
+{
+	Thread_Context *tctx = get_tctx();
+
+	Arena *arena = arena_get_temp__internal(tctx, tctx->temp_arena_index);
+	tctx->temp_arena_index = 1 - tctx->temp_arena_index;
 
 	arena_scope_begin(arena);
 	return arena;
@@ -1903,7 +1912,7 @@ void arena_release_temp(Arena *temp)
 Arena *arena_get_temp_unscoped(void)
 {
 	Thread_Context *tctx = get_tctx();
-	return tctx->temp_arenas[1 - tctx->temp_arena_index];
+	return arena_get_temp__internal(tctx, 1 - tctx->temp_arena_index);
 }
 
 void arena_reset_temp_arenas(void)
@@ -3300,9 +3309,19 @@ String string_iter_word(String *iter)
 
 String string_iter_line(String *iter)
 {
-	String_Pair split = string_split_line(*iter);
-	*iter = split.r;
-	return split.l;
+	String line;
+	line.chars = NULL;
+	line.count = 0;
+
+	if (iter->count > 0)
+	{
+		String_Pair split = string_split_line(*iter);
+
+		line  = split.l;
+		*iter = split.r;
+	}
+
+	return line;
 }
 
 Parse_Number_Result string_parse_u64(String string)
