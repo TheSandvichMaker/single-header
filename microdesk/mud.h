@@ -791,7 +791,7 @@ MUD_INLINE void mud_set_value(Mud_Node *node, MUD_STRING value)
 	if (node->flags & (Mud_Node_Flag_is_quoted_string|Mud_Node_Flag_is_backticked_string))
 	{
 		MUD_STRING_BYTES_ASSIGN(node->value_unquoted, MUD_STRING_BYTES(node->value) + 1);
-		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 1);
+		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 2);
 	}
 
 	if (MUD_STRING_COUNT(node->value) > 0)
@@ -916,7 +916,7 @@ MUD_INLINE void mud_parse_object_style_value(Mud_Parser *p, Mud_Node *node, Mud_
 	if (node->flags & (Mud_Node_Flag_is_quoted_string|Mud_Node_Flag_is_backticked_string))
 	{
 		MUD_STRING_BYTES_ASSIGN(node->value_unquoted, MUD_STRING_BYTES(node->value) + 1);
-		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 1);
+		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 2);
 	}
 
 	if (MUD_STRING_COUNT(node->value) > 0)
@@ -942,7 +942,7 @@ MUD_INLINE void mud_parse_array_style_value(Mud_Parser *p, Mud_Node *node)
 	if (node->flags & (Mud_Node_Flag_is_quoted_string|Mud_Node_Flag_is_backticked_string))
 	{
 		MUD_STRING_BYTES_ASSIGN(node->value_unquoted, MUD_STRING_BYTES(node->value) + 1);
-		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 1);
+		MUD_STRING_COUNT_ASSIGN(node->value_unquoted, MUD_STRING_COUNT(node->value) - 2);
 	}
 
 	if (MUD_STRING_COUNT(node->value) > 0)
@@ -1160,6 +1160,8 @@ Mud_Parse_Result mud_parse_from_string(Mud_Parser *p, Mud_Node *nodes_buffer, Mu
 
 	if (!mud_is_nil(result.root))
 	{
+		p->parent = result.root;
+
 		mud_parse_element(p, result.root, Mud_Parse_Group_objects, Mud_Token_eof);
 		result.root->flags |= Mud_Node_Flag_is_root;
 
