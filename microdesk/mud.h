@@ -191,7 +191,7 @@ enum
 	Mud_Node_Flag_number_is_negative   = (1u << 11),
 	Mud_Node_Flag_number_is_octal      = (1u << 12),
 	Mud_Node_Flag_number_is_hex        = (1u << 13),
-	Mud_Node_Flag_number_is_real       = (1u << 14),
+	Mud_Node_Flag_number_is_integer    = (1u << 14),
 	Mud_Node_Flag_number_is_scientific = (1u << 15),
 	Mud_Node_Flag_is_true              = (1u << 16),
 	Mud_Node_Flag_is_false             = (1u << 17),
@@ -508,7 +508,7 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 				// TODO(daniel): Detect malformed numbers!
 
 				p->token.kind = Mud_Token_number;
-				flags |= Mud_Node_Flag_is_number;
+				flags |= Mud_Node_Flag_is_number|Mud_Node_Flag_number_is_integer;
 
 				if (p->at[0] == '-')
 				{
@@ -548,16 +548,28 @@ MUD_INLINE void mud_next_token(Mud_Parser *p)
 
 						while (mud_char_is_digit(p->at[0]))
 						{
+							if (p->at[0] != '0')
+							{
+								flags &= ~Mud_Node_Flag_number_is_integer;
+							}
+
 							mud_next(p);
 						}
 					}
 
 					if (p->at[0] == 'e' || p->at[0] == 'E')
 					{
+						flags |= Mud_Node_Flag_number_is_scientific;
+
 						mud_next(p);
 
 						if (p->at[0] == '-' || p->at[0] == '+')
 						{
+							if (p->at[0] == '-')
+							{
+								flags &= ~Mud_Node_Flag_number_is_integer;
+							}
+
 							mud_next(p);
 						}
 
@@ -752,6 +764,7 @@ MUD_INLINE Mud_Node *mud_allocate_node(Mud_Parser *p)
 {
 	if (p->out_nodes_used >= p->out_node_capacity)
 	{
+		mud_error(p, mud_nil(), Mud_Error_out_of_nodes, MUD_TEXT("Ran out of nodes!"));
 		return mud_nil();
 	}
 

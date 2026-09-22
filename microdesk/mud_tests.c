@@ -200,6 +200,147 @@ void test_mud_scalar_values(Test_Context *t)
 	TEST_CHECK(t, string_match(node->value_unquoted, S("raw text")), "value_unquoted must strip both delimiters");
 }
 
+void test_mud_number_flags(Test_Context *t)
+{
+	String source = S(
+		"whole      = 42\n"
+		"zero       = 0\n"
+		"negative   = -2\n"
+		"trailing   = 1.0\n"
+		"padded     = 2.00\n"
+		"fraction   = 1.5\n"
+		"neg_frac   = -1.5\n"
+		"tiny       = 0.0000001\n"
+		"exponent   = 1e9\n"
+		"upper_exp  = 1E9\n"
+		"plus_exp   = 1e+9\n"
+		"minus_exp  = 1e-9\n"
+		"real_exp   = 1.0e9\n"
+		"hex        = 0x1f\n"
+		"octal      = 0777\n");
+
+	Mud_Parse_Result result = mud_test_parse(source);
+	TEST_CHECK(t, result.error == Mud_Error_none);
+
+	Mud_Node *node = mud_get_child(result.root, S("whole"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+	TEST_CHECK(t, !(node->flags & Mud_Node_Flag_number_is_scientific));
+
+	node = mud_get_child(result.root, S("zero"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+
+	node = mud_get_child(result.root, S("negative"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_negative));
+
+	node = mud_get_child(result.root, S("trailing"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer),
+		"a zero fraction still denotes an integer");
+
+	node = mud_get_child(result.root, S("padded"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer),
+		"a zero fraction still denotes an integer");
+
+	node = mud_get_child(result.root, S("fraction"));
+	TEST_CHECK(t, !(node->flags & Mud_Node_Flag_number_is_integer));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_is_number));
+
+	node = mud_get_child(result.root, S("neg_frac"));
+	TEST_CHECK(t, !(node->flags & Mud_Node_Flag_number_is_integer));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_negative));
+
+	node = mud_get_child(result.root, S("tiny"));
+	TEST_CHECK(t, !(node->flags & Mud_Node_Flag_number_is_integer),
+		"a non zero digit anywhere in the fraction clears the flag");
+
+	node = mud_get_child(result.root, S("exponent"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_scientific));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+
+	node = mud_get_child(result.root, S("upper_exp"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_scientific));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+
+	node = mud_get_child(result.root, S("plus_exp"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_scientific));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer),
+		"a positive exponent scales up and stays integral");
+
+	node = mud_get_child(result.root, S("minus_exp"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_scientific));
+	TEST_CHECK(t, !(node->flags & Mud_Node_Flag_number_is_integer),
+		"a negative exponent can introduce a fraction");
+
+	node = mud_get_child(result.root, S("real_exp"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_scientific));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+
+	node = mud_get_child(result.root, S("hex"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_hex));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+	TEST_CHECK(t, !(node->flags & Mud_Node_Flag_number_is_scientific));
+
+	node = mud_get_child(result.root, S("octal"));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_octal));
+	TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_number_is_integer));
+
+	TEST_CHECK(t, !(mud_get_child(result.root, S("whole"))->flags & Mud_Node_Flag_number_is_hex));
+	TEST_CHECK(t, !(mud_get_child(result.root, S("fraction"))->flags & Mud_Node_Flag_number_is_octal));
+}
+
+void test_mud_integer_flag_is_sound(Test_Context *t)
+{
+	struct
+	{
+		String source;
+		bool   integral;
+	}
+	cases[] =
+	{
+		{ S("n = 1\n"),         true  },
+		{ S("n = 0\n"),         true  },
+		{ S("n = -2\n"),        true  },
+		{ S("n = 1.0\n"),       true  },
+		{ S("n = 2.00\n"),      true  },
+		{ S("n = 1.\n"),        true  },
+		{ S("n = 0.0\n"),       true  },
+		{ S("n = 1e9\n"),       true  },
+		{ S("n = 1e+9\n"),      true  },
+		{ S("n = 1.0e9\n"),     true  },
+		{ S("n = 0x1f\n"),      true  },
+		{ S("n = 0777\n"),      true  },
+		{ S("n = 1e-0\n"),      true  },
+		{ S("n = 1.5e1\n"),     true  },
+		{ S("n = 100e-2\n"),    true  },
+		{ S("n = 1.5\n"),       false },
+		{ S("n = -1.5\n"),      false },
+		{ S("n = 0.5\n"),       false },
+		{ S("n = 123.456\n"),   false },
+		{ S("n = 0.0000001\n"), false },
+		{ S("n = 1e-9\n"),      false },
+		{ S("n = 1.0e-1\n"),    false },
+	};
+
+	for (isz i = 0; i < ArrayCount(cases); i += 1)
+	{
+		Mud_Parse_Result result = mud_test_parse(cases[i].source);
+		TEST_CHECK(t, result.error == Mud_Error_none);
+
+		Mud_Node *node = mud_get_child(result.root, S("n"));
+		bool claims_integer = !!(node->flags & Mud_Node_Flag_number_is_integer);
+
+		TEST_CHECK(t, !claims_integer || cases[i].integral,
+			"number_is_integer must never be set for a non integral value: %.*s", Sx(node->value));
+		TEST_CHECK(t, !!(node->flags & Mud_Node_Flag_is_number),
+			"%.*s must lex as a number", Sx(node->value));
+
+		if (!cases[i].integral)
+		{
+			TEST_CHECK(t, !claims_integer, "%.*s is not integral", Sx(node->value));
+		}
+	}
+}
+
 void test_mud_delimiters(Test_Context *t)
 {
 	String commas   = S("object { a = 1, b = 2 }\narray [ 1, 2, 3 ]\n");
@@ -375,14 +516,42 @@ void test_mud_errors(Test_Context *t)
 	result = mud_test_parse(S("arr [ 1, 2\n"));
 	TEST_CHECK(t, result.error == Mud_Error_syntax_error, "an unclosed array is an error");
 
-	result = mud_parse_from_string(&mud_test_parser, mud_test_nodes, 0, S("a = 1\n"));
-	TEST_CHECK(t, result.error == Mud_Error_out_of_nodes);
-	TEST_CHECK(t, mud_is_nil(result.root));
-
 	result = mud_test_parse(S("a = 1\nb = 2\n"));
 	TEST_CHECK(t, result.error == Mud_Error_none, "a later good parse must clear the error state");
 	TEST_CHECK(t, string_empty(result.error_message));
 	TEST_CHECK(t, mud_test_child_count(result.root) == 2);
+}
+
+void test_mud_node_budget(Test_Context *t)
+{
+	String source = S("a = 1\nb = 2\nc = 3\nd = 4\n");
+
+	for (isz capacity = 0; capacity < 5; capacity += 1)
+	{
+		Mud_Parse_Result result = mud_parse_from_string(&mud_test_parser, mud_test_nodes, capacity, source);
+
+		TEST_CHECK(t, result.error == Mud_Error_out_of_nodes,
+			"a buffer of %zd nodes must report running out, not truncate silently", capacity);
+		TEST_CHECK(t, result.node_count <= capacity,
+			"a buffer of %zd nodes must never be overrun", capacity);
+		TEST_CHECK(t, !string_empty(result.error_message));
+		TEST_CHECK(t, mud_is_nil(result.root) == (capacity == 0),
+			"only a zero sized buffer fails to produce a root");
+	}
+
+	Mud_Parse_Result result = mud_parse_from_string(&mud_test_parser, mud_test_nodes, 5, source);
+	TEST_CHECK(t, result.error == Mud_Error_none, "an exactly sized buffer must succeed");
+	TEST_CHECK(t, result.node_count == 5, "root plus four elements");
+	TEST_CHECK(t, string_empty(result.error_message));
+	TEST_CHECK(t, mud_test_child_count(result.root) == 4);
+
+	result = mud_parse_from_string(&mud_test_parser, mud_test_nodes, 3, S("obj { a = 1, b = 2, c = 3 }\n"));
+	TEST_CHECK(t, result.error == Mud_Error_out_of_nodes, "exhaustion inside a group is reported too");
+	TEST_CHECK(t, result.node_count <= 3);
+
+	result = mud_parse_from_string(&mud_test_parser, mud_test_nodes, 3, S("@a @b @c thing = 1\n"));
+	TEST_CHECK(t, result.error == Mud_Error_out_of_nodes, "exhaustion while parsing tags is reported too");
+	TEST_CHECK(t, result.node_count <= 3);
 }
 
 void test_mud_line_and_column(Test_Context *t)
@@ -439,12 +608,15 @@ int entry_point(void)
 	TEST_RUN(t, test_mud_document_structure);
 	TEST_RUN(t, test_mud_nesting);
 	TEST_RUN(t, test_mud_scalar_values);
+	TEST_RUN(t, test_mud_number_flags);
+	TEST_RUN(t, test_mud_integer_flag_is_sound);
 	TEST_RUN(t, test_mud_delimiters);
 	TEST_RUN(t, test_mud_tags);
 	TEST_RUN(t, test_mud_comments);
 	TEST_RUN(t, test_mud_lookup);
 	TEST_RUN(t, test_mud_nil_nodes);
 	TEST_RUN(t, test_mud_errors);
+	TEST_RUN(t, test_mud_node_budget);
 	TEST_RUN(t, test_mud_line_and_column);
 	TEST_RUN(t, test_mud_real_document);
 
