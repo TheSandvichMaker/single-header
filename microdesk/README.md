@@ -85,11 +85,20 @@ Leading and trailing comments are attached to elements
 my_object {
 	member1 = value     // Trailing comment 1
 	member2 [ 1, 2, 3 ] // Trailing comment 2
+	// Closing comment
 } // Trailing comment 3
 ```
 
 Here, the leading comment and trailing comment 3 are attached to `my_object`,
-while trailing comments 1 and 2 are attached to `member1` and `member2`
+while trailing comments 1 and 2 are attached to `member1` and `member2`. A
+trailing comment must sit on the same line as the element it follows;
+comments on their own line lead the element below them. The closing comment
+has no element below it, so it is attached to `my_object` as well, separately
+from its trailing comment.
+
+A comment that is alone on its line keeps that line's leading whitespace, so
+that a multi-line comment reads as one block the consumer can reindent as a
+unit. A trailing comment starts at its first slash.
 
 There are more defines you can use to configure the library, see the header of
 `mud.h` for details.

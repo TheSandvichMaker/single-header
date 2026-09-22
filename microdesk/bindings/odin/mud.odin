@@ -70,6 +70,7 @@ Node :: struct {
 	value_unquoted:   string,
 	leading_comment:  string,
 	trailing_comment: string,
+	closing_comment:  string,
 }
 
 Parser :: struct {
@@ -94,15 +95,16 @@ Parser :: struct {
 	line_comment:    ^Node,
 
 	token: struct {
-		start:      [^]u8,
-		end:        [^]u8,
-		line_start: [^]u8,
-		line:       int,
-		col:        int,
-		value:      string,
-		is_newline: Bool,
-		kind:       c.char,
-		flags:      Node_Flags,
+		start:           [^]u8,
+		end:             [^]u8,
+		line_start:      [^]u8,
+		line:            int,
+		col:             int,
+		value:           string,
+		is_newline:      Bool,
+		crossed_newline: Bool,
+		kind:            c.char,
+		flags:           Node_Flags,
 	},
 
 	error:            Error,
